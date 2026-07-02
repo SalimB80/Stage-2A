@@ -1,0 +1,8 @@
+/**/follower:
+  ros__parameters:
+    max_lin: 0.18
+    max_ang: 1.0
+    k_lin: 0.6
+    k_ang: 1.5
+    stop_range: 0.25
+    search_when_lost: true
