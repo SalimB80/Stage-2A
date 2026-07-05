@@ -11,7 +11,7 @@ def generate_launch_description():
     ns = LaunchConfiguration('namespace')
     idx = LaunchConfiguration('robot_index')
     formation = LaunchConfiguration('formation')
-    role = LaunchConfiguration('role')
+    role = LaunchConfiguration('role')   # 'leader' | 'follower' | 'tracker'
 
     return LaunchDescription([
         DeclareLaunchArgument('namespace', default_value='tortuga1'),
@@ -29,8 +29,7 @@ def generate_launch_description():
                     'launch', 'robot.launch.py'])),
             ),
 
-            # Camera (camera_ros) - capteur CSI, format BGR888 640x480
-            # BGR888 = directement exploitable par OpenCV (pas de conversion).
+            # Camera (camera_ros) - capteur CSI, BGR888 640x480
             Node(
                 package='camera_ros',
                 executable='camera_node',
@@ -43,7 +42,7 @@ def generate_launch_description():
                 remappings=[('~/image_raw', 'camera/image_raw')],
             ),
 
-            # Follower : demarre uniquement si role == 'follower'
+            # FOLLOWER : suit un leader avec offset de formation (role == follower)
             Node(
                 package='formation_control',
                 executable='follower',
@@ -51,6 +50,15 @@ def generate_launch_description():
                 condition=IfCondition(
                     PythonExpression(["'", role, "' == 'follower'"])),
                 parameters=[{'robot_index': idx, 'formation': formation}],
+            ),
+
+            # TRACKER : autonome, cherche puis suit la couleur (role == tracker)
+            Node(
+                package='formation_control',
+                executable='tracker',
+                name='tracker',
+                condition=IfCondition(
+                    PythonExpression(["'", role, "' == 'tracker'"])),
             ),
         ]),
     ])

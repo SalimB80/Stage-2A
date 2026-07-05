@@ -24,6 +24,7 @@ setup(
     entry_points={
         'console_scripts': [
             'follower = formation_control.follower_node:main',
+            'tracker = formation_control.tracker_node:main',
         ],
     },
 )
