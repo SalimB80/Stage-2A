@@ -25,6 +25,9 @@ setup(
         'console_scripts': [
             'follower = formation_control.follower_node:main',
             'tracker = formation_control.tracker_node:main',
+            'teleop_zqsd = formation_control.teleop_zqsd:main',
+            'wander = formation_control.wander_node:main',
+            'recorder = formation_control.recorder_node:main',
         ],
     },
 )
