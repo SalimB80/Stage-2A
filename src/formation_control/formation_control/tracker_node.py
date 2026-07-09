@@ -67,6 +67,8 @@ class TrackerNode(Node):
         self.declare_parameter("k_lin", 0.6)
         self.declare_parameter("k_ang", 1.8)
         self.declare_parameter("obstacle_dist", 0.35)
+        self.declare_parameter("safety_dist", 0.16)   # MESURE : collision en
+        #   rotation sous 0.16 m. Le tracker ne s'approche jamais plus pres.
         self.declare_parameter("arrive_dist", 0.35)
         self.declare_parameter("lidar_cone_deg", 8.0)
         self.declare_parameter("align_tol_deg", 20.0)
@@ -302,8 +304,11 @@ class TrackerNode(Node):
         arrive = self.get_parameter("arrive_dist").value
         e_dist = self.target_distance - des
         near_by_area = self.color_area >= self.get_parameter("area_near").value
-        if self.target_distance <= arrive or near_by_area:
+        too_close = self.nearest_dist <= self.get_parameter("safety_dist").value + 0.04
+        if self.target_distance <= arrive or near_by_area or too_close:
             t.linear.x = 0.0
+            if too_close:               # trop pres : petit recul de securite
+                t.linear.x = -0.05
         else:
             t.linear.x = self._clamp(self.get_parameter("k_lin").value * e_dist,
                                      self.get_parameter("v_max").value)

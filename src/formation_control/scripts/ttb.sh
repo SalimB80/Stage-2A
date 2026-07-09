@@ -55,13 +55,13 @@ cmd_start() {
   local N=${1:-4}
   local FORM=${2:-colonne}
   echo "Leader tortuga1 : bringup"
-  ssh_bg 1 "ROS_NAMESPACE=tortuga1 ros2 launch turtlebot3_bringup robot.launch.py"
+  ssh_bg 1 "ros2 launch turtlebot3_bringup robot.launch.py namespace:=tortuga1"
   for i in $(seq 2 $N); do
     echo "Follower tortuga$i : bringup + follower ($FORM)"
-    ssh_bg $i "ROS_NAMESPACE=tortuga$i ros2 launch turtlebot3_bringup robot.launch.py"
+    ssh_bg $i "ros2 launch turtlebot3_bringup robot.launch.py namespace:=tortuga$i"
     sleep 3
-    ssh_bg $i "ros2 run formation_control follower --ros-args \
-      -r __ns:=/tortuga$i -p robot_index:=$i -p formation:=$FORM"
+    ssh_bg $i "ROS_NAMESPACE=tortuga$i ros2 run formation_control follower --ros-args \
+      -p robot_index:=$i -p formation:=$FORM"
   done
   echo "Tout est lance. Logs : ~/ros_<i>.log sur chaque robot."
   echo "Pilote le leader :  ./ttb.sh teleop"

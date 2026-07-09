@@ -24,8 +24,12 @@ class WanderNode(Node):
         super().__init__("wander")
         self.declare_parameter("v_forward", 0.12)
         self.declare_parameter("w_turn", 0.8)
-        self.declare_parameter("obstacle_dist", 0.45)   # declenche un virage
-        self.declare_parameter("critical_dist", 0.22)   # declenche un recul
+        self.declare_parameter("obstacle_dist", 0.45)   # ralentit / prepare virage
+        self.declare_parameter("safety_dist", 0.16)     # MESURE : sous 0.16 m
+        #   collision en rotation. On ne descend jamais sous cette limite.
+        self.declare_parameter("pause_time", 1.5)       # s d'arret quand obstacle
+        self.declare_parameter("wait_clear_time", 2.0)  # s : si toujours bloque
+        #   apres la pause, on considere l'obstacle fixe -> on change de cap.
         self.declare_parameter("front_deg", 25.0)       # demi-secteur frontal
         self.declare_parameter("heading_change_s", 5.0) # cap aleatoire toutes les ~Ns
 
@@ -34,6 +38,7 @@ class WanderNode(Node):
         self.odom_speed = 0.0
         self.stuck_since = None
         self.escape_until = None
+        self.pause_since = None      # debut de la pause "attends que ca degage"
         self.turn_dir = 1.0
         self.next_heading_change = self.get_clock().now()
 
@@ -107,31 +112,57 @@ class WanderNode(Node):
         else:
             self.stuck_since = None
 
-        if d_front < crit:
-            self.state = "BACKUP"
-        elif d_front < obst:
-            if self.state != "TURN":
-                # tourne vers le cote le plus degage
+        safety = self.get_parameter("safety_dist").value
+        pause_t = self.get_parameter("pause_time").value
+        wait_t = self.get_parameter("wait_clear_time").value
+
+        # --- SECURITE 0.16 en 3 temps ---
+        # 1) obstacle proche -> on s'ARRETE (jamais sous 0.16 m).
+        # 2) on attend 1-2 s : si l'objet s'ecarte, on repart tout droit.
+        # 3) s'il est toujours la (fixe), on change de direction.
+        blocked = d_front < obst
+        if blocked:
+            if self.pause_since is None:
+                self.pause_since = now
+            waited = (now - self.pause_since).nanoseconds / 1e9
+
+            if waited < pause_t:
+                # temps 1 : arret complet (on ne s'approche pas plus)
+                self.state = "PAUSE"
+                # si vraiment trop pres, petit recul minimal pour garder 0.16
+                if d_front < safety + 0.03:
+                    t.linear.x = -0.05
+                self.cmd_pub.publish(t)
+                return
+            elif waited < pause_t + wait_t:
+                # temps 2 : on attend encore un peu, immobile
+                self.state = "WAIT"
+                self.cmd_pub.publish(t)   # arret
+                return
+            else:
+                # temps 3 : obstacle fixe -> on tourne vers le plus degage
+                self.state = "REROUTE"
                 self.turn_dir = 1.0 if d_left > d_right else -1.0
-            self.state = "TURN"
-        elif self.state in ("TURN", "BACKUP") and d_front > obst * 1.3:
-            self.state = "FORWARD"
+                t.angular.z = w * self.turn_dir
+                # si degage devant apres avoir tourne, on relachera au prochain tick
+                if d_front > obst * 1.2:
+                    self.pause_since = None
+                    self.state = "FORWARD"
+                self.cmd_pub.publish(t)
+                return
+        else:
+            # voie libre : on annule toute pause en cours
+            self.pause_since = None
 
-        if self.state == "BACKUP":
-            t.linear.x = -0.08
-            t.angular.z = w * self.turn_dir
-        elif self.state == "TURN":
-            t.angular.z = w * self.turn_dir
-        else:  # FORWARD
-            t.linear.x = v
-            if now >= self.next_heading_change:
-                # petit changement de cap aleatoire pour couvrir la piece
-                self.turn_dir = random.choice([-1.0, 1.0])
-                t.angular.z = random.uniform(0.2, 0.6) * self.turn_dir
-                delay = self.get_parameter("heading_change_s").value
-                self.next_heading_change = now + rclpy.duration.Duration(
-                    seconds=random.uniform(0.6 * delay, 1.6 * delay))
-
+        # --- FORWARD normal + errance aleatoire ---
+        self.state = "FORWARD"
+        t.linear.x = v
+        if now >= self.next_heading_change:
+            self.turn_dir = random.choice([-1.0, 1.0])
+            t.angular.z = random.uniform(0.2, 0.6) * self.turn_dir
+            delay = self.get_parameter("heading_change_s").value
+            self.next_heading_change = now + rclpy.duration.Duration(
+                seconds=random.uniform(0.6 * delay, 1.6 * delay))
         self.cmd_pub.publish(t)
 
 
