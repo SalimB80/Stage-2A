@@ -30,6 +30,7 @@ from geometry_msgs.msg import Twist
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
+from rclpy.qos import qos_profile_sensor_data
 
 # ---------------------------------------------------------------------------
 # PRESETS COULEURS (HSV OpenCV : H 0-179, S 0-255, V 0-255)
@@ -105,10 +106,23 @@ class TrackerNode(Node):
         self.search_dir = random.choice([-1.0, 1.0])
         self.search_switch = self.get_clock().now()
 
+        # Compteurs de messages recus : servent au diagnostic terminal.
+        # Sans ca, impossible de savoir si un capteur ne publie pas ou si
+        # c'est un MISMATCH QoS (publisher BEST_EFFORT vs subscriber RELIABLE).
+        self.cam_count = 0
+        self.scan_count = 0
+        self.odom_count = 0
+
         self.cmd_pub = self.create_publisher(Twist, "cmd_vel", 10)
-        self.create_subscription(Image, "camera/image_raw", self.camera_cb, 5)
-        self.create_subscription(LaserScan, "scan", self.lidar_cb, 5)
-        self.create_subscription(Odometry, "odom", self.odom_cb, 5)
+        # QoS capteurs (BEST_EFFORT) : Gazebo/le lidar/la camera publient en
+        # BEST_EFFORT. Un subscriber RELIABLE (defaut) ne recoit alors RIEN
+        # -> le nœud reste bloque en SEARCH. On aligne donc sur sensor_data.
+        self.create_subscription(Image, "camera/image_raw", self.camera_cb,
+                                 qos_profile_sensor_data)
+        self.create_subscription(LaserScan, "scan", self.lidar_cb,
+                                 qos_profile_sensor_data)
+        self.create_subscription(Odometry, "odom", self.odom_cb,
+                                 qos_profile_sensor_data)
         self.create_timer(0.1, self.control_loop)
         self.create_timer(1.0, self.debug_log)
 
@@ -134,6 +148,7 @@ class TrackerNode(Node):
 
     # ---------- CAMERA ----------
     def camera_cb(self, msg):
+        self.cam_count += 1
         try:
             frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         except Exception as e:
@@ -159,6 +174,7 @@ class TrackerNode(Node):
             self.color_seen = False
 
     def odom_cb(self, msg):
+        self.odom_count += 1
         v = msg.twist.twist.linear
         self.odom_speed = math.sqrt(v.x*v.x + v.y*v.y)
 
@@ -168,6 +184,7 @@ class TrackerNode(Node):
     # repere du scan, et les fenetres d'indices BOUCLENT (modulo n) car
     # 359 deg et 1 deg sont voisins.
     def lidar_cb(self, msg):
+        self.scan_count += 1
         ranges = np.array(msg.ranges)
         ranges[np.isinf(ranges) | np.isnan(ranges)] = 99.0
         n = len(ranges)
@@ -288,10 +305,18 @@ class TrackerNode(Node):
             self.cmd_pub.publish(self._search())
 
     def debug_log(self):
+        # Diagnostic capteurs : cam/scan/odom = nb de messages recus depuis
+        # le demarrage. Si l'un reste a 0, le capteur ne publie pas OU il y a
+        # un mismatch QoS -> le nœud est "bloque" faute de donnees.
+        cam_ok = "OK" if self.cam_count else "!! AUCUN (QoS/topic ?)"
+        scan_ok = "OK" if self.scan_count else "!! AUCUN (QoS/topic ?)"
+        odom_ok = "OK" if self.odom_count else "!! AUCUN (QoS/topic ?)"
         self.get_logger().info(
             f"[{self.state}] vu={self.color_seen} area={self.color_area} "
             f"d_cible={self.target_distance:.2f} "
-            f"d_obst={self.nearest_dist:.2f}@{math.degrees(self.nearest_angle):+.0f}deg")
+            f"d_obst={self.nearest_dist:.2f}@{math.degrees(self.nearest_angle):+.0f}deg "
+            f"| cam={self.cam_count}({cam_ok}) scan={self.scan_count}({scan_ok}) "
+            f"odom={self.odom_count}({odom_ok}) vitesse={self.odom_speed:.3f}")
 
     def _bearing_error(self):
         """Erreur angulaire vs bearing desire (V aplati)."""

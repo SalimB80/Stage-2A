@@ -37,6 +37,12 @@ class WanderNode(Node):
         self.scan = None
         self.state = "FORWARD"
         self.odom_speed = 0.0
+        # Compteurs de messages : diagnostic terminal (voir debug_log).
+        self.scan_count = 0
+        self.odom_count = 0
+        self.d_front = 99.0
+        self.d_left = 99.0
+        self.d_right = 99.0
         self.stuck_since = None
         self.escape_until = None
         self.pause_since = None      # debut de la pause "attends que ca degage"
@@ -44,17 +50,33 @@ class WanderNode(Node):
         self.next_heading_change = self.get_clock().now()
 
         self.cmd_pub = self.create_publisher(Twist, "cmd_vel", 10)
+        # QoS capteurs (BEST_EFFORT) : indispensable pour le lidar Gazebo,
+        # sinon aucun scan recu et le robot reste immobile.
         self.create_subscription(LaserScan, "scan", self.scan_cb, qos_profile_sensor_data)
-        self.create_subscription(Odometry, "odom", self.odom_cb, 5)
+        self.create_subscription(Odometry, "odom", self.odom_cb, qos_profile_sensor_data)
         self.create_timer(0.1, self.loop)
+        self.create_timer(1.0, self.debug_log)
         self.get_logger().info("Wander demarre (lidar seul)")
 
     def scan_cb(self, msg):
+        self.scan_count += 1
         self.scan = msg
 
     def odom_cb(self, msg):
+        self.odom_count += 1
         v = msg.twist.twist.linear
         self.odom_speed = math.sqrt(v.x*v.x + v.y*v.y)
+
+    def debug_log(self):
+        # Etat lisible au terminal. Si scan reste a 0 -> capteur muet ou
+        # mismatch QoS (le nœud attend le scan et ne bouge pas).
+        scan_ok = "OK" if self.scan_count else "!! AUCUN (QoS/topic ?)"
+        odom_ok = "OK" if self.odom_count else "!! AUCUN (QoS/topic ?)"
+        self.get_logger().info(
+            f"[{self.state}] scan={self.scan_count}({scan_ok}) "
+            f"odom={self.odom_count}({odom_ok}) vitesse={self.odom_speed:.3f} "
+            f"d_front={self.d_front:.2f} d_left={self.d_left:.2f} "
+            f"d_right={self.d_right:.2f}")
 
     def sector_min(self, msg, center_rad, half_rad):
         # Gere les lidars en [0, 2pi] : angle normalise + fenetre circulaire.
@@ -84,6 +106,7 @@ class WanderNode(Node):
         d_front = self.sector_min(self.scan, 0.0, front_half)
         d_left = self.sector_min(self.scan, math.radians(45), math.radians(30))
         d_right = self.sector_min(self.scan, math.radians(-45), math.radians(30))
+        self.d_front, self.d_left, self.d_right = d_front, d_left, d_right
 
         obst = self.get_parameter("obstacle_dist").value
         crit = self.get_parameter("critical_dist").value
