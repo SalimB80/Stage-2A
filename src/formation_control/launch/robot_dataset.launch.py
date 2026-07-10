@@ -15,37 +15,44 @@ def generate_launch_description():
 
     # record : video + rosbag (scan/odom/imu).
     # slam   : lance slam_toolbox pour cartographier la piece (map a la
-    #          demande). Independant de record. Namespace pose 1 seule fois.
+    #          demande). Independant de record.
+    #
+    # NAMESPACE : le bringup TurtleBot3 applique DEJA le namespace via son
+    # propre argument (comme le GUI qui l'appelle avec namespace:=tortugaX).
+    # Il ne faut donc PAS l'envelopper en plus dans PushRosNamespace, sinon le
+    # namespace est applique DEUX fois -> /tortugaX/tortugaX/scan (double NS) :
+    # wander/rosbag ecoutent /tortugaX/scan et ne recoivent alors rien.
+    # -> On passe namespace:=ns a l'include (une seule fois), et on met
+    #    PushRosNamespace UNIQUEMENT autour de NOS noeuds.
 
     return LaunchDescription([
         DeclareLaunchArgument('namespace', default_value='tortuga1'),
         DeclareLaunchArgument('record', default_value='true'),
         DeclareLaunchArgument('slam', default_value='false'),
 
+        # Bringup TurtleBot3 : namespace applique par SON argument (1 seule fois)
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(PathJoinSubstitution([
+                FindPackageShare('turtlebot3_bringup'),
+                'launch', 'robot.launch.py'])),
+            launch_arguments={'namespace': ns}.items(),
+        ),
+
+        # Nos noeuds a nous : un seul PushRosNamespace.
         GroupAction([
             PushRosNamespace(ns),
 
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(PathJoinSubstitution([
-                    FindPackageShare('turtlebot3_bringup'),
-                    'launch', 'robot.launch.py'])),
-            ),
-
             Node(
                 package='camera_ros', executable='camera_node', name='camera',
-                # Dataset. IMPORTANT sur IMX219 : le mode 640x480 haute-frequence
-                # est un CROP central (zoom, champ etroit). Pour un champ LARGE
-                # et HOMOGENE sur tous les robots (necessaire a la detection), on
-                # FIXE sensor_mode=1920:1080 (recadrage 16:9 modere) -> ~47 fps.
-                # Fixer sensor_mode ecrase aussi tout crop "bidouille" sur un
-                # robot. FrameDurationLimits en us/image : 22000 = ~45 fps, marge
-                # sure au-dessus du plancher du mode (une valeur trop basse est
-                # REJETEE -> l'auto-expo reprend et retombe a ~16 fps). La borne
-                # force l'auto-expo a garder une pose courte (compense en gain).
-                # Le recorder mesure et affiche le FPS reel.
+                # Dataset : resolution de base 640x480 + FPS MAX. On NE fixe PAS
+                # sensor_mode (laisse libcamera choisir le mode rapide). 16971
+                # us/image = plancher HARDWARE mesure (~58.9 fps). ATTENTION :
+                # une valeur SOUS 16971 (ex. 16666) est REJETEE -> l'auto-expo
+                # reprend et retombe a ~16 fps. La borne force l'auto-expo a
+                # garder une pose courte (compense en gain) -> 59 fps ET
+                # luminosite auto. Le recorder mesure et affiche le FPS reel.
                 parameters=[{'format': 'BGR888', 'width': 640, 'height': 480,
-                             'sensor_mode': '1920:1080',
-                             'FrameDurationLimits': [22000, 22000]}],
+                             'FrameDurationLimits': [16971, 16971]}],
                 remappings=[('~/image_raw', 'camera/image_raw')],
             ),
 
@@ -75,4 +82,3 @@ def generate_launch_description():
             output='screen',
         ),
     ])
-
