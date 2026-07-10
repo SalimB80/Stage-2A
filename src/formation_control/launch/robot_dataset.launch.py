@@ -44,15 +44,14 @@ def generate_launch_description():
 
             Node(
                 package='camera_ros', executable='camera_node', name='camera',
-                # Dataset : resolution de base 640x480 + FPS MAX. On NE fixe PAS
-                # sensor_mode (laisse libcamera choisir le mode rapide). 16971
-                # us/image = plancher HARDWARE mesure (~58.9 fps). ATTENTION :
-                # une valeur SOUS 16971 (ex. 16666) est REJETEE -> l'auto-expo
-                # reprend et retombe a ~16 fps. La borne force l'auto-expo a
-                # garder une pose courte (compense en gain) -> 59 fps ET
-                # luminosite auto. Le recorder mesure et affiche le FPS reel.
+                # Dataset : 640x480 @ 30 fps FIABLE. 33333 us/image = 30 fps.
+                # (Le 59 fps -> 16971 saturait le CPU du Pi -> camera/recorder
+                # plantaient -> enregistrement en morceaux. 30 fps stable donne
+                # un dataset COMPLET, ce qui vaut mieux qu'un pic de fps perdu.)
+                # Ne pas descendre sous 16971 (rejete). La borne force l'auto-expo
+                # a une pose courte (compense en gain). Le recorder mesure le FPS.
                 parameters=[{'format': 'BGR888', 'width': 640, 'height': 480,
-                             'FrameDurationLimits': [16971, 16971]}],
+                             'FrameDurationLimits': [33333, 33333]}],
                 remappings=[('~/image_raw', 'camera/image_raw')],
             ),
 

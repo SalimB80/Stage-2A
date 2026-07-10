@@ -28,11 +28,10 @@ def generate_launch_description():
         Node(
             package='camera_ros', executable='camera_node', name='camera',
             namespace=ns,
-            # Resolution de base 640x480, 16971 us/image = plancher hardware
-            # ~58.9 fps (voir robot_dataset.launch.py). NE PAS descendre sous
-            # 16971 : rejete par libcamera -> retombe a ~16 fps.
+            # 640x480 @ 30 fps FIABLE : 33333 us/image (le 59 fps saturait le
+            # CPU du Pi -> plantages, voir robot_dataset.launch.py).
             parameters=[{'format': 'BGR888', 'width': 640, 'height': 480,
-                         'FrameDurationLimits': [16971, 16971]}],
+                         'FrameDurationLimits': [33333, 33333]}],
             remappings=[('~/image_raw', 'camera/image_raw')],
         ),
     ])

@@ -24,10 +24,14 @@ class WanderNode(Node):
         super().__init__("wander")
         self.declare_parameter("v_forward", 0.12)
         self.declare_parameter("w_turn", 0.8)
-        self.declare_parameter("critical_dist", 0.16)
-        self.declare_parameter("obstacle_dist", 0.45)   # ralentit / prepare virage
-        self.declare_parameter("safety_dist", 0.16)     # MESURE : sous 0.16 m
-        #   collision en rotation. On ne descend jamais sous cette limite.
+        self.declare_parameter("critical_dist", 0.28)
+        self.declare_parameter("obstacle_dist", 0.60)   # ralentit / prepare virage
+        self.declare_parameter("safety_dist", 0.32)     # DOUBLE de l'ancien 0.16 :
+        #   le lidar voit le point le plus proche de l'AUTRE robot, mais MON
+        #   chassis depasse devant mon lidar ET le sien depasse aussi -> a 0.16 m
+        #   lidar, les carrosseries se touchent presque. Deux corps de ~16 cm +
+        #   robots en mouvement (vitesse de rapprochement) -> on garde 0.32 m
+        #   mini au lidar. On ne descend jamais sous cette limite.
         self.declare_parameter("pause_time", 2.0)       # s d'arret quand obstacle
         #   (on espere qu'il bouge avant de contourner).
         self.declare_parameter("wait_clear_time", 2.0)  # s : si toujours bloque
@@ -37,13 +41,16 @@ class WanderNode(Node):
         #   Le robot est un cube 16x16 cm (demi-diagonale ~0.11 m). En rotation,
         #   ses COINS balaient un cercle : on exige donc que tout un cone large
         #   soit degage avant de repartir, sinon le coin accroche l'obstacle.
-        self.declare_parameter("robot_radius", 0.12)    # demi-diagonale + marge
+        self.declare_parameter("robot_radius", 0.18)    # demi-diagonale + marge
+        #   pour DEUX corps (le mien + celui du robot croise) pendant un virage.
         # --- Errance continue (meandre) : au lieu d'un seul a-coup toutes les
         # 5 s, on applique une vitesse de rotation aleatoire QUI DURE et se
         # renouvelle souvent -> trajectoire sinueuse, exploration reguliere.
         self.declare_parameter("wander_w_max", 0.5)     # amplitude du meandre
-        self.declare_parameter("wander_min_s", 1.2)     # duree mini d'un cap
-        self.declare_parameter("wander_max_s", 2.5)     # duree maxi d'un cap
+        self.declare_parameter("wander_min_s", 3.0)     # duree mini d'un cap (x2.5)
+        self.declare_parameter("wander_max_s", 6.5)     # duree maxi d'un cap (x2.6)
+        #   Caps tenus plus longtemps -> le robot avance plus longtemps dans une
+        #   meme direction (marche plus droite, moins de changements de cap).
 
         self.scan = None
         self.state = "FORWARD"

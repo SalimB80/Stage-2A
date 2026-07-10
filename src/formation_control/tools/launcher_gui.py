@@ -303,11 +303,10 @@ def bringup_start():
                f"ros2 run camera_ros camera_node "
                f"--ros-args -r __ns:=/tortuga{i} -r __node:=camera "
                f"-p format:=BGR888 -p width:=640 -p height:=480 "
-               # Resolution de base 640x480. FrameDurationLimits SANS ESPACE
-               # (une espace casse l'argument -> ignore) : 16971 us = plancher
-               # hardware ~58.9 fps. Ne pas descendre sous 16971 (rejete ->
-               # retombe a ~16 fps).
-               f"-p FrameDurationLimits:=[16971,16971] "
+               # 640x480 @ 30 fps FIABLE : 33333 us/image. SANS ESPACE dans le
+               # tableau (une espace casse l'argument -> ignore). Le 59 fps
+               # (16971) saturait le CPU du Pi -> camera/recorder plantaient.
+               f"-p FrameDurationLimits:=[33333,33333] "
                f"-r ~/image_raw:=camera/image_raw")
     log("Bringup + caméra lancés : " + ", ".join(f"t{i}" for i in present)
         + " (≈15 s de démarrage).", "ok")
