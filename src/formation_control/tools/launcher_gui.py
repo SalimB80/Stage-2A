@@ -325,35 +325,68 @@ def behavior_start():
         log("Sélectionne au moins un robot.", "warn")
         return
     m = mode_var.get()
-    behavior_stop(silent=True)
-    if m == "cascade":
-        for rob, role, color, bear in build_chain():
-            if role == "leader":
-                log(f"t{rob} = leader (à piloter en ZQSD).")
-                continue
-            ssh_bg(rob, robot_env() +
-                   f"ros2 run formation_control tracker "
-                   f"--ros-args -r __ns:=/tortuga{rob} "
-                   f"-p target_color:={color} -p desired_bearing:={bear} "
-                   f"-p target_distance:={TARGET_DISTANCE}")
-        log(f"Cascade lancée ({form_var.get()}).", "ok")
-    else:
-        for i in present:
-            ssh_bg(i, robot_env() +
-                   f"ros2 run formation_control wander "
-                   f"--ros-args -r __ns:=/tortuga{i}")
-            if m == "dataset":
+    form = form_var.get()
+    chain = build_chain() if m == "cascade" else None
+    launch_btn.config(state="disabled")
+    log("Préparation… (arrêt de l'ancien mode)")
+
+    def work():
+        # 1) COUPER l'ancien mode et ATTENDRE la fin des kills.
+        # Indispensable : lancer sans attendre creait une COURSE entre le
+        # pkill (asynchrone) et le ros2 run (asynchrone). Selon le timing SSH
+        # de chaque robot, le pkill pouvait arriver APRES le lancement et tuer
+        # le noeud a peine demarre -> "un seul robot sur deux marche" et
+        # "impossible de relancer apres Couper". On tue en bloquant, puis on
+        # laisse le DDS retirer les anciens noeuds avant de relancer.
+        procs = [subprocess.Popen(
+                    ssh_args(i, "pkill -9 -f '[w]ander'; pkill -9 -f '[t]racker'; "
+                                "pkill -TERM -f '[r]ecorder'; "
+                                "pkill -TERM -f '[b]ag record'", timeout=4),
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                 for i in present]
+        for p in procs:
+            try:
+                p.wait(timeout=8)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+        time.sleep(0.8)  # laisse le DDS liberer /tortugaX/wander|tracker
+
+        # 2) RELANCER le mode choisi.
+        if m == "cascade":
+            for rob, role, color, bear in chain:
+                if role == "leader":
+                    root.after(0, lambda r=rob:
+                               log(f"t{r} = leader (à piloter en ZQSD)."))
+                    continue
+                ssh_bg(rob, robot_env() +
+                       f"ros2 run formation_control tracker "
+                       f"--ros-args -r __ns:=/tortuga{rob} "
+                       f"-p target_color:={color} -p desired_bearing:={bear} "
+                       f"-p target_distance:={TARGET_DISTANCE}")
+            root.after(0, lambda: log(f"Cascade lancée ({form}).", "ok"))
+        else:
+            for i in present:
                 ssh_bg(i, robot_env() +
-                       f"ros2 run formation_control recorder "
-                       f"--ros-args -r __ns:=/tortuga{i} "
-                       f"-p robot_name:=tortuga{i} -p segment_minutes:=5.0")
-                ssh_bg(i, robot_env() +
-                       f"mkdir -p ~/dataset && ros2 bag record "
-                       f"-o ~/dataset/bag_$(date +%Y%m%d_%H%M%S)_tortuga{i} "
-                       f"/tortuga{i}/scan /tortuga{i}/odom /tortuga{i}/imu")
-        log(("Dataset lancé (enregistrement !) : " if m == "dataset"
-             else "Errance lancée : ") + ", ".join(f"t{i}" for i in present),
-            "ok")
+                       f"ros2 run formation_control wander "
+                       f"--ros-args -r __ns:=/tortuga{i}")
+                if m == "dataset":
+                    ssh_bg(i, robot_env() +
+                           f"ros2 run formation_control recorder "
+                           f"--ros-args -r __ns:=/tortuga{i} "
+                           f"-p robot_name:=tortuga{i} -p segment_minutes:=5.0")
+                    ssh_bg(i, robot_env() +
+                           f"mkdir -p ~/dataset && ros2 bag record "
+                           f"-o ~/dataset/bag_$(date +%Y%m%d_%H%M%S)_tortuga{i} "
+                           f"/tortuga{i}/scan /tortuga{i}/odom /tortuga{i}/imu")
+            msg = ("Dataset lancé (enregistrement !) : " if m == "dataset"
+                   else "Errance lancée : ") + ", ".join(f"t{i}" for i in present)
+            root.after(0, lambda msg=msg: log(msg, "ok"))
+        root.after(0, lambda: launch_btn.config(state="normal"))
+
+    threading.Thread(target=work, daemon=True).start()
 
 
 def behavior_stop(silent=False):
