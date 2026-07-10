@@ -17,13 +17,14 @@ from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
 import numpy as np
-
+from rclpy.qos import qos_profile_sensor_data
 
 class WanderNode(Node):
     def __init__(self):
         super().__init__("wander")
         self.declare_parameter("v_forward", 0.12)
         self.declare_parameter("w_turn", 0.8)
+        self.declare_parameter("critical_dist", 0.16)
         self.declare_parameter("obstacle_dist", 0.45)   # ralentit / prepare virage
         self.declare_parameter("safety_dist", 0.16)     # MESURE : sous 0.16 m
         #   collision en rotation. On ne descend jamais sous cette limite.
@@ -43,7 +44,7 @@ class WanderNode(Node):
         self.next_heading_change = self.get_clock().now()
 
         self.cmd_pub = self.create_publisher(Twist, "cmd_vel", 10)
-        self.create_subscription(LaserScan, "scan", self.scan_cb, 5)
+        self.create_subscription(LaserScan, "scan", self.scan_cb, qos_profile_sensor_data)
         self.create_subscription(Odometry, "odom", self.odom_cb, 5)
         self.create_timer(0.1, self.loop)
         self.get_logger().info("Wander demarre (lidar seul)")
