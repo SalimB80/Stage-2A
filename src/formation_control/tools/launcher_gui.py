@@ -303,6 +303,13 @@ def bringup_start():
                f"ros2 run camera_ros camera_node "
                f"--ros-args -r __ns:=/tortuga{i} -r __node:=camera "
                f"-p format:=BGR888 -p width:=640 -p height:=480 "
+               # sensor_mode=1920:1080 : champ LARGE homogene (~47 fps), evite
+               # le crop/zoom du mode 640 haute-freq et ecrase tout crop
+               # bidouille sur un robot. FrameDurationLimits SANS ESPACE (une
+               # espace casse l'argument -> ignore) : 22000 us = ~45 fps, marge
+               # sure (valeur trop basse = rejetee -> retombe a ~16 fps).
+               f"-p sensor_mode:=1920:1080 "
+               f"-p FrameDurationLimits:=[22000,22000] "
                f"-r ~/image_raw:=camera/image_raw")
     log("Bringup + caméra lancés : " + ", ".join(f"t{i}" for i in present)
         + " (≈15 s de démarrage).", "ok")

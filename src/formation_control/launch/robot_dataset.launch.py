@@ -33,8 +33,19 @@ def generate_launch_description():
 
             Node(
                 package='camera_ros', executable='camera_node', name='camera',
+                # Dataset. IMPORTANT sur IMX219 : le mode 640x480 haute-frequence
+                # est un CROP central (zoom, champ etroit). Pour un champ LARGE
+                # et HOMOGENE sur tous les robots (necessaire a la detection), on
+                # FIXE sensor_mode=1920:1080 (recadrage 16:9 modere) -> ~47 fps.
+                # Fixer sensor_mode ecrase aussi tout crop "bidouille" sur un
+                # robot. FrameDurationLimits en us/image : 22000 = ~45 fps, marge
+                # sure au-dessus du plancher du mode (une valeur trop basse est
+                # REJETEE -> l'auto-expo reprend et retombe a ~16 fps). La borne
+                # force l'auto-expo a garder une pose courte (compense en gain).
+                # Le recorder mesure et affiche le FPS reel.
                 parameters=[{'format': 'BGR888', 'width': 640, 'height': 480,
-                             'FrameDurationLimits': [33333, 33333]}],
+                             'sensor_mode': '1920:1080',
+                             'FrameDurationLimits': [22000, 22000]}],
                 remappings=[('~/image_raw', 'camera/image_raw')],
             ),
 
