@@ -1,3 +1,5 @@
 build/
 install/
 log/
+/dataset_collected
+/src/formation_control/tools/dataset_collected
