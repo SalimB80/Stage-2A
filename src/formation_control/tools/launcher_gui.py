@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
-TurtleBot3 Control — v8  (interface type Notion : sobre, claire, fiable)
+TurtleBot3 Control — v9 (clean English UI)
 
-Architecture 2 couches :
-  1) BRINGUP  : bringup natif TurtleBot3 (moteurs+lidar) + camera.
-  2) MODE     : errance | cascade | dataset, lance PAR-DESSUS le bringup.
-Toutes les commandes utilisent  ros2 run ... --ros-args -r __ns:=/tortugaX
-(la methode validee : un seul namespace, QoS capteur pour le scan).
+Two-layer architecture:
+  1) BRINGUP : native TurtleBot3 bringup (motors + lidar) + camera.
+  2) MODE    : wander | cascade | dataset, launched ON TOP of the bringup.
+All commands use  ros2 run ... --ros-args -r __ns:=/tortugaX
+(the validated method: single namespace, sensor QoS for the scan).
 
-Debug organise en 3 onglets : Journal | Topics | Noeuds.
-Camera affichee 100% BRUTE (aucune conversion de couleur).
+Inspection tabs: Log | Camera | Lidar | Topics | Dataset.
+  - Camera : slider Raw / Color detection / Mask.
+  - Lidar  : slider Points / Sectors / Map (accumulated).
 """
 
 import tkinter as tk
 from tkinter import ttk, messagebox
+from collections import deque
 import subprocess
 import threading
 import time
@@ -24,23 +26,24 @@ try:
     import rclpy
     from rclpy.node import Node as RosNode
     from rclpy.qos import qos_profile_sensor_data
-    from sensor_msgs.msg import LaserScan, CompressedImage
+    from sensor_msgs.msg import LaserScan, CompressedImage, BatteryState
+    from nav_msgs.msg import Odometry
     import numpy as np
     import cv2
 except Exception:
     ROS_OK = False
 
-# ---------------- Config flotte ----------------
+# ---------------- Fleet config ----------------
 ROBOTS = {
     1: ("tortuga1", "192.168.0.201"),
     2: ("tortuga2", "192.168.0.202"),
     3: ("tortuga3", "192.168.0.203"),
     4: ("tortuga4", "192.168.0.204"),
 }
-HELMETS = {1: "jaune", 2: "rouge", 3: "cyan", 4: "jaune"}
+HELMETS = {1: "yellow", 2: "red", 3: "cyan", 4: "yellow"}
 FORMATION_BEARINGS = {
-    "colonne": [0, 0, 0], "ligne": [30, -30, 30],
-    "triangle": [25, -25, 0], "carre": [20, -20, 0],
+    "column": [0, 0, 0], "line": [30, -30, 30],
+    "triangle": [25, -25, 0], "square": [20, -20, 0],
 }
 TARGET_DISTANCE = 0.6
 SAFETY = 0.16
@@ -48,30 +51,37 @@ PW = "1234"
 ROS_DOMAIN_ID = 30
 DATASET_SH = "./src/formation_control/tools/dataset_tools.sh"
 
-# ---------------- Palette Notion ----------------
-# Fond clair, gris doux, texte sombre, un seul accent (bleu ardoise).
-C_BG = "#ffffff"          # fond principal
-C_PANE = "#f7f7f5"        # panneaux (gris tres clair facon Notion)
-C_PANE2 = "#efefec"       # zones enfoncees
-C_LINE = "#e3e3e0"        # bordures fines
-C_TXT = "#37352f"         # texte principal (presque noir chaud)
-C_SUB = "#787774"         # texte secondaire gris
-C_FAINT = "#9b9a97"       # texte tres discret
-C_ACCENT = "#2f6fb3"      # bleu ardoise (accent unique)
-C_ACCENT_BG = "#eaf1f8"   # fond accent leger
-C_OK = "#448361"          # vert sobre
-C_WARN = "#d9730d"        # orange sobre
-C_ERR = "#e03e3e"         # rouge sobre
-C_OKBG = "#edf5f0"
-C_WARNBG = "#faf3ec"
+# HSV color presets for the camera "detection"/"mask" views (OpenCV HSV).
+COLORS_HSV = {
+    "yellow": [((20, 80, 80), (35, 255, 255))],
+    "cyan":   [((85, 80, 80), (100, 255, 255))],
+    "red":    [((0, 100, 80), (8, 255, 255)),
+               ((172, 100, 80), (179, 255, 255))],
+}
+DRAW_BGR = {"yellow": (0, 200, 220), "red": (40, 40, 220), "cyan": (200, 190, 0)}
+
+# ---------------- Palette (clean, one accent) ----------------
+C_BG = "#ffffff"
+C_PANE = "#f7f7f5"
+C_PANE2 = "#eeeeec"
+C_LINE = "#e3e3e0"
+C_TXT = "#2b2a27"
+C_SUB = "#6c6a66"
+C_FAINT = "#9b9a97"
+C_ACCENT = "#2f6fb3"
+C_ACCENT_D = "#2a5f9a"
+C_ACCENT_BG = "#eaf1f8"
+C_OK = "#448361"
+C_WARN = "#d9730d"
+C_ERR = "#e03e3e"
 C_ERRBG = "#fbecec"
-HELMET_HEX = {"jaune": "#dfab01", "rouge": "#e03e3e", "cyan": "#2fa8b3"}
+HELMET_HEX = {"yellow": "#dfab01", "red": "#e03e3e", "cyan": "#2fa8b3"}
 
 FONT = "Segoe UI"
 MONO = "Cascadia Mono"
 
 
-# ---------------- Environnements & SSH ----------------
+# ---------------- Environments & SSH ----------------
 def robot_env():
     return (f"export ROS_DOMAIN_ID={ROS_DOMAIN_ID}; "
             "export TURTLEBOT3_MODEL=burger; export LDS_MODEL=LDS-03; "
@@ -111,13 +121,15 @@ def open_terminal(bash_cmd, fallback):
     return False
 
 
-# ---------------- Hub ROS (topics, scan, image) ----------------
+# ---------------- ROS Hub (topics, scan, image, odom, battery) ----------------
 class Hub:
     def __init__(self):
-        self.frames = {}          # idx -> image BRUTE (np array, telle que recue)
+        self.frames = {}          # idx -> raw BGR image (as received)
         self.scans = {}           # idx -> LaserScan
+        self.odom = {}            # idx -> (x, y, yaw)
+        self.battery = {}         # idx -> voltage (V), for dataset auto-stop
         self.topics_by_robot = {i: set() for i in ROBOTS}
-        self.topic_types = {}     # nom -> type
+        self.topic_types = {}
         self.subbed = set()
         self.node = None
         self.started = False
@@ -163,22 +175,39 @@ class Hub:
                         lambda m, i=idx: self.scans.__setitem__(i, m),
                         qos_profile_sensor_data)
                     self.subbed.add(name)
+                elif name.endswith("/odom") and \
+                        "nav_msgs/msg/Odometry" in types:
+                    self.node.create_subscription(
+                        Odometry, name,
+                        lambda m, i=idx: self._odom(i, m), qos_profile_sensor_data)
+                    self.subbed.add(name)
+                elif name.endswith("/battery_state") and \
+                        "sensor_msgs/msg/BatteryState" in types:
+                    self.node.create_subscription(
+                        BatteryState, name,
+                        lambda m, i=idx: self.battery.__setitem__(i, m.voltage),
+                        10)
+                    self.subbed.add(name)
         self.topics_by_robot = seen
 
     def _img(self, idx, msg):
-        # Decodage BRUT : on garde exactement ce que la camera envoie,
-        # AUCUNE conversion de couleur. cv2.imdecode rend du BGR ; on le
-        # convertit une seule fois en RGB pour Tk (Tk attend du RGB),
-        # sans jamais reordonner les canaux au-dela de ce strict besoin.
         try:
             arr = np.frombuffer(msg.data, np.uint8)
             bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
             if bgr is not None:
-                self.frames[idx] = bgr    # stocke le BGR d'origine
+                self.frames[idx] = bgr
         except Exception:
             pass
 
+    def _odom(self, idx, msg):
+        p = msg.pose.pose.position
+        q = msg.pose.pose.orientation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        self.odom[idx] = (p.x, p.y, yaw)
 
+
+# ---------------- Small helpers ----------------
 def sector_min(msg, center_deg, half_deg):
     if not msg.ranges or msg.angle_increment == 0.0:
         return 99.0
@@ -201,7 +230,31 @@ def sector_min(msg, center_deg, half_deg):
     return float(np.min(valid)) if len(valid) else 99.0
 
 
-# ---------------- Selection & chaine ----------------
+def color_mask(bgr, color):
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    mask = None
+    for lo, hi in COLORS_HSV.get(color, COLORS_HSV["yellow"]):
+        m = cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8))
+        mask = m if mask is None else cv2.bitwise_or(mask, m)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
+    return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
+
+
+def parse_num(s, default=0.0):
+    try:
+        return float(str(s).replace(",", "."))
+    except Exception:
+        return default
+
+
+def to_photo(bgr):
+    """np BGR image -> Tk PhotoImage (PPM). imencode('.ppm') writes correct RGB."""
+    ok, buf = cv2.imencode(".ppm", bgr)
+    return tk.PhotoImage(data=buf.tobytes()) if ok else None
+
+
+# ---------------- Selection & chain ----------------
 def present_indices():
     return sorted(i for i in ROBOTS if present_vars[i].get())
 
@@ -221,7 +274,7 @@ def build_chain():
     return out
 
 
-# ---------------- Journal (avec niveaux) ----------------
+# ---------------- Log ----------------
 def log(msg, level="info"):
     ts = time.strftime("%H:%M:%S")
     tag = {"info": "info", "ok": "ok", "warn": "warn", "err": "err"}.get(level, "info")
@@ -235,29 +288,29 @@ def log(msg, level="info"):
 
 def refresh_info(*_):
     m = mode_var.get()
-    launch_btn.config(text={"cascade": "Lancer la cascade",
-                            "errance": "Lancer l'errance",
-                            "dataset": "Lancer le dataset"}[m])
+    launch_btn.config(text={"cascade": "Start cascade",
+                            "wander": "Start wander",
+                            "dataset": "Start dataset"}[m])
     form_combo.configure(state="readonly" if m == "cascade" else "disabled")
     present = present_indices()
     if not present:
-        info.set("Sélectionne un ou plusieurs robots.")
+        info.set("Select one or more robots.")
         return
     if m == "cascade":
         ch = build_chain()
         parts = [f"t{ch[0][0]} · leader"] + \
                 [f"t{r}→{c}" for r, _, c, b in ch[1:]]
-        info.set("Chaîne :  " + "    ".join(parts))
-    elif m == "errance":
-        info.set("Errance autonome (sécurité 0,16 m) — "
+        info.set("Chain:  " + "    ".join(parts))
+    elif m == "wander":
+        info.set("Autonomous wander (safety 0.32 m) — "
                  + ", ".join(f"t{i}" for i in present))
     else:
-        info.set("Dataset vidéo + lidar — " + ", ".join(f"t{i}" for i in present))
+        info.set("Dataset video + lidar — " + ", ".join(f"t{i}" for i in present))
 
 
-# ---------------- Etat (ping + disque) ----------------
+# ---------------- State (ping + disk) ----------------
 def refresh_state():
-    log("Actualisation de l'état…")
+    log("Refreshing state…")
     def work():
         res = {}
         for i, (_, ip) in ROBOTS.items():
@@ -286,14 +339,14 @@ def apply_state(res):
     for i, (ok, free) in res.items():
         dots[i].configure(fg=C_OK if ok else C_ERR)
         space_lbl[i].config(text=free)
-    log("État actualisé.", "ok")
+    log("State refreshed.", "ok")
 
 
-# ---------------- Couche 1 : BRINGUP ----------------
+# ---------------- Layer 1: BRINGUP ----------------
 def bringup_start():
     present = present_indices()
     if not present:
-        log("Sélectionne au moins un robot.", "warn")
+        log("Select at least one robot.", "warn")
         return
     for i in present:
         ssh_bg(i, robot_env() +
@@ -303,13 +356,12 @@ def bringup_start():
                f"ros2 run camera_ros camera_node "
                f"--ros-args -r __ns:=/tortuga{i} -r __node:=camera "
                f"-p format:=BGR888 -p width:=640 -p height:=480 "
-               # 640x480 @ 30 fps FIABLE : 33333 us/image. SANS ESPACE dans le
-               # tableau (une espace casse l'argument -> ignore). Le 59 fps
-               # (16971) saturait le CPU du Pi -> camera/recorder plantaient.
+               # 640x480 @ 30 fps (reliable). No space in the array (a space
+               # splits the argument -> ignored). 59 fps saturated the Pi CPU.
                f"-p FrameDurationLimits:=[33333,33333] "
                f"-r ~/image_raw:=camera/image_raw")
-    log("Bringup + caméra lancés : " + ", ".join(f"t{i}" for i in present)
-        + " (≈15 s de démarrage).", "ok")
+    log("Bringup + camera started: " + ", ".join(f"t{i}" for i in present)
+        + " (~15 s to boot).", "ok")
 
 
 def bringup_stop():
@@ -319,29 +371,31 @@ def bringup_stop():
                   "pkill -9 -f '[s]ingle_coin'; pkill -9 -f '[c]amera_node'; "
                   "pkill -9 -f '[r]obot_state'; pkill -9 -f '[d]iff_drive'; "
                   "pkill -9 -f '[l]d08'")
-    log("Bringup coupé : " + ", ".join(f"t{i}" for i in present), "warn")
+    log("Bringup stopped: " + ", ".join(f"t{i}" for i in present), "warn")
 
 
-# ---------------- Couche 2 : MODE ----------------
+# ---------------- Layer 2: MODE ----------------
 def behavior_start():
     present = present_indices()
     if not present:
-        log("Sélectionne au moins un robot.", "warn")
+        log("Select at least one robot.", "warn")
         return
     m = mode_var.get()
     form = form_var.get()
     chain = build_chain() if m == "cascade" else None
+    seg_minutes = 5.0
+    if m == "dataset":
+        seg_minutes = parse_num(seg_var.get(), 5.0)
+        if seg_minutes < 0.2:
+            seg_minutes = 5.0
     launch_btn.config(state="disabled")
-    log("Préparation… (arrêt de l'ancien mode)")
+    log("Preparing… (stopping previous mode)")
 
     def work():
-        # 1) COUPER l'ancien mode et ATTENDRE la fin des kills.
-        # Indispensable : lancer sans attendre creait une COURSE entre le
-        # pkill (asynchrone) et le ros2 run (asynchrone). Selon le timing SSH
-        # de chaque robot, le pkill pouvait arriver APRES le lancement et tuer
-        # le noeud a peine demarre -> "un seul robot sur deux marche" et
-        # "impossible de relancer apres Couper". On tue en bloquant, puis on
-        # laisse le DDS retirer les anciens noeuds avant de relancer.
+        # 1) Stop the previous mode and WAIT for the kills to finish.
+        # Launching without waiting created a RACE between the async pkill and
+        # the async ros2 run -> the pkill could land after the launch and kill
+        # the just-started node. We kill blocking, then let DDS drop the nodes.
         procs = [subprocess.Popen(
                     ssh_args(i, "pkill -9 -f '[w]ander'; pkill -9 -f '[t]racker'; "
                                 "pkill -TERM -f '[r]ecorder'; "
@@ -356,21 +410,21 @@ def behavior_start():
                     p.kill()
                 except Exception:
                     pass
-        time.sleep(0.8)  # laisse le DDS liberer /tortugaX/wander|tracker
+        time.sleep(0.8)
 
-        # 2) RELANCER le mode choisi.
+        # 2) Launch the chosen mode.
         if m == "cascade":
             for rob, role, color, bear in chain:
                 if role == "leader":
                     root.after(0, lambda r=rob:
-                               log(f"t{r} = leader (à piloter en ZQSD)."))
+                               log(f"t{r} = leader (drive it with ZQSD)."))
                     continue
                 ssh_bg(rob, robot_env() +
                        f"ros2 run formation_control tracker "
                        f"--ros-args -r __ns:=/tortuga{rob} "
                        f"-p target_color:={color} -p desired_bearing:={bear} "
                        f"-p target_distance:={TARGET_DISTANCE}")
-            root.after(0, lambda: log(f"Cascade lancée ({form}).", "ok"))
+            root.after(0, lambda: log(f"Cascade started ({form}).", "ok"))
         else:
             for i in present:
                 ssh_bg(i, robot_env() +
@@ -380,48 +434,112 @@ def behavior_start():
                     ssh_bg(i, robot_env() +
                            f"ros2 run formation_control recorder "
                            f"--ros-args -r __ns:=/tortuga{i} "
-                           f"-p robot_name:=tortuga{i} -p segment_minutes:=5.0")
+                           f"-p robot_name:=tortuga{i} "
+                           f"-p segment_minutes:={seg_minutes}")
                     ssh_bg(i, robot_env() +
                            f"mkdir -p ~/dataset && ros2 bag record "
                            f"-o ~/dataset/bag_$(date +%Y%m%d_%H%M%S)_tortuga{i} "
                            f"/tortuga{i}/scan /tortuga{i}/odom /tortuga{i}/imu")
-            msg = ("Dataset lancé (enregistrement !) : " if m == "dataset"
-                   else "Errance lancée : ") + ", ".join(f"t{i}" for i in present)
+            msg = ("Dataset started (recording!): " if m == "dataset"
+                   else "Wander started: ") + ", ".join(f"t{i}" for i in present)
             root.after(0, lambda msg=msg: log(msg, "ok"))
+            if m == "dataset":
+                root.after(0, start_guard)
         root.after(0, lambda: launch_btn.config(state="normal"))
 
     threading.Thread(target=work, daemon=True).start()
 
 
 def behavior_stop(silent=False):
+    stop_guard()
     present = present_indices() or list(ROBOTS)
     for i in present:
         ssh_bg(i, "pkill -9 -f '[w]ander'; pkill -9 -f '[t]racker'; "
                   "pkill -TERM -f '[r]ecorder'; pkill -TERM -f '[b]ag record'")
     if not silent:
-        log("Mode coupé (bringup conservé) : "
+        log("Mode stopped (bringup kept): "
             + ", ".join(f"t{i}" for i in present), "warn")
+
+
+# ---------------- Dataset watchdog (auto-stop) ----------------
+# During a dataset session, monitors ELAPSED time, battery VOLTAGE (via the ROS
+# hub) and FREE storage (df over SSH). When a threshold is crossed, the mode is
+# stopped CLEANLY (behavior_stop -> SIGTERM to recorder/rosbag, segments closed
+# properly). Bringup stays up so the data can be pulled. Thresholds live in the
+# "Dataset" inspection tab.
+dataset_guard = {"active": False, "t0": 0.0}
+
+
+def robot_free_gb(i):
+    try:
+        r = subprocess.run(ssh_args(i, "df -B1 ~ | tail -1 | awk '{print $4}'",
+                                    timeout=4),
+                           capture_output=True, text=True, timeout=8)
+        b = (r.stdout or "").strip()
+        return int(b) / 1e9 if b.isdigit() else None
+    except Exception:
+        return None
+
+
+def start_guard():
+    dataset_guard["active"] = True
+    dataset_guard["t0"] = time.time()
+    threading.Thread(target=guard_loop, daemon=True).start()
+    log("Dataset watchdog active (duration · battery · storage).")
+
+
+def stop_guard():
+    dataset_guard["active"] = False
+
+
+def guard_loop():
+    while dataset_guard["active"]:
+        reason = None
+        dur = parse_num(dur_var.get())      # min ; 0 = unlimited
+        batt = parse_num(batt_var.get())    # V  ; 0 = disabled
+        disk = parse_num(disk_var.get())    # GB ; 0 = disabled
+        targets_ = present_indices() or list(ROBOTS)
+        if dur > 0 and (time.time() - dataset_guard["t0"]) >= dur * 60:
+            reason = f"duration {dur:.0f} min reached"
+        if reason is None and hub is not None and batt > 0:
+            for i in targets_:
+                v = hub.battery.get(i)
+                if v is not None and 0.5 < v < batt:
+                    reason = f"tortuga{i} battery low ({v:.1f} V)"
+                    break
+        if reason is None and disk > 0:
+            for i in targets_:
+                free = robot_free_gb(i)
+                if free is not None and free < disk:
+                    reason = f"tortuga{i} storage low ({free:.1f} GB)"
+                    break
+        if reason:
+            dataset_guard["active"] = False
+            root.after(0, lambda r=reason: (
+                log(f"AUTO-STOP dataset: {r}", "warn"), behavior_stop()))
+            return
+        time.sleep(15)
 
 
 def apply_formation():
     if mode_var.get() != "cascade":
-        log("La formation ne s'applique qu'en cascade.", "warn")
+        log("Formation only applies in cascade mode.", "warn")
         return
     for rob, _, _, bear in build_chain()[1:]:
         subprocess.Popen(["bash", "-c", pc_env() +
             f"ros2 param set /tortuga{rob}/tracker desired_bearing {bear}"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    log(f"Formation appliquée à chaud ({form_var.get()}).", "ok")
+    log(f"Formation applied live ({form_var.get()}).", "ok")
 
 
 def teleop_robot(idx):
     if open_terminal(pc_env() +
                      f"ros2 run formation_control teleop_zqsd tortuga{idx}",
-                     f"Manuel : teleop_zqsd tortuga{idx}"):
-        log(f"Téléop ZQSD tortuga{idx} (nouvelle fenêtre).")
+                     f"Manual: teleop_zqsd tortuga{idx}"):
+        log(f"ZQSD teleop tortuga{idx} (new window).")
 
 
-# ---------------- STOP total & build ----------------
+# ---------------- Full STOP & build ----------------
 KILL_CMD = ("pkill -TERM -f '[r]ecorder'; pkill -TERM -f '[b]ag record'; sleep 1; "
             "pkill -9 -f '[r]obot.launch'; pkill -9 -f '[t]urtlebot3_ros'; "
             "pkill -9 -f '[s]ingle_coin'; pkill -9 -f '[c]amera_node'; "
@@ -433,7 +551,7 @@ CHECK_CMD = "pgrep -fc -- '[-]-ros-args' || true"
 
 
 def stop_everything():
-    log("STOP — extinction de tous les nœuds…", "warn")
+    log("STOP — killing all nodes…", "warn")
     stop_btn.config(state="disabled")
     def work():
         procs = {i: subprocess.Popen(ssh_args(i, KILL_CMD, timeout=3),
@@ -455,14 +573,14 @@ def stop_everything():
             except Exception:
                 rep.append(f"t{i} off")
         root.after(0, lambda: (stop_btn.config(state="normal"),
-                               log("Arrêt terminé — " + "   ".join(rep),
+                               log("Stop done — " + "   ".join(rep),
                                    "ok" if all("!" not in x for x in rep) else "warn")))
     threading.Thread(target=work, daemon=True).start()
 
 
 def build_deploy():
     idxs = " ".join(map(str, present_indices())) or "1 2 3 4"
-    log(f"Build + deploy sur {idxs}… (1–2 min)")
+    log(f"Build + deploy on {idxs}… (1–2 min)")
     def work():
         try:
             r = subprocess.run(
@@ -472,36 +590,35 @@ def build_deploy():
                  f"./src/formation_control/tools/deploy_build.sh {idxs}"],
                 capture_output=True, text=True, timeout=240)
             if r.returncode == 0:
-                root.after(0, lambda: log("Build + deploy réussi.", "ok"))
+                root.after(0, lambda: log("Build + deploy done.", "ok"))
             else:
                 out = (r.stdout + r.stderr)[-300:]
-                root.after(0, lambda: log(f"Échec build : {out}", "err"))
+                root.after(0, lambda: log(f"Build failed: {out}", "err"))
         except subprocess.TimeoutExpired:
-            root.after(0, lambda: log("Build : délai dépassé (>4 min).", "err"))
+            root.after(0, lambda: log("Build: timeout (>4 min).", "err"))
         except Exception as e:
-            root.after(0, lambda: log(f"Build : exception {e}", "err"))
+            root.after(0, lambda: log(f"Build: exception {e}", "err"))
     threading.Thread(target=work, daemon=True).start()
 
 
-# ---------------- Données ----------------
+# ---------------- Data ----------------
 def ds_pull():
     idx = " ".join(map(str, targets()))
-    open_terminal(pc_env() + f"cd ~/formation_ws && {DATASET_SH} pull {idx}; "
-                  "echo; echo '=== Terminé. Entrée ==='; read",
-                  "Manuel : dataset_tools.sh pull")
-    log(f"Pull lancé (robots {idx}).")
+    open_terminal(pc_env() + f"cd ~/formation_ws && {DATASET_SH} collect {idx}; "
+                  "echo; echo '=== Done. Enter ==='; read",
+                  "Manual: dataset_tools.sh collect")
+    log(f"Pull started (robots {idx}).")
 
 
 def ds_clean():
     idx = " ".join(map(str, targets()))
-    if not messagebox.askyesno("Supprimer les données",
-            f"Supprimer TOUTES les données (vidéo + lidar) sur {idx} ?\n\n"
-            "Vérifie d'abord le Pull."):
+    if not messagebox.askyesno("Delete data",
+            f"Delete ALL data (video + lidar) on {idx}?\n\n"
+            "Pull first to be safe."):
         return
-    open_terminal(pc_env() + f"cd ~/formation_ws && echo oui | "
-                  f"{DATASET_SH} clean {idx}; echo '=== Fait. Entrée ==='; read",
-                  "Manuel : dataset_tools.sh clean")
-    log(f"Suppression lancée (robots {idx}).", "warn")
+    for i in targets():
+        ssh_bg(i, "rm -rf ~/dataset/*")
+    log(f"Delete started (robots {idx}).", "warn")
 
 
 # ============================================================
@@ -509,64 +626,81 @@ def ds_clean():
 # ============================================================
 root = tk.Tk()
 root.title("TurtleBot3 Control")
-root.geometry("980x680")
+root.geometry("1220x880")
 root.configure(bg=C_BG)
-root.minsize(880, 600)
+root.minsize(1120, 820)
 
 style = ttk.Style(root)
 style.theme_use("clam")
 style.configure("TNotebook", background=C_BG, borderwidth=0)
 style.configure("TNotebook.Tab", background=C_PANE, foreground=C_SUB,
-                padding=(14, 7), font=(FONT, 9), borderwidth=0)
+                padding=(16, 8), font=(FONT, 9), borderwidth=0)
 style.map("TNotebook.Tab",
-          background=[("selected", C_BG)],
-          foreground=[("selected", C_TXT)])
+          background=[("selected", C_BG)], foreground=[("selected", C_TXT)])
 style.configure("TCombobox", fieldbackground="#fff", background="#fff",
                 foreground=C_TXT, arrowcolor=C_SUB, bordercolor=C_LINE)
+style.configure("Accent.Horizontal.TScale", background=C_BG)
 
 
 def hsep(parent):
     tk.Frame(parent, bg=C_LINE, height=1).pack(fill="x", pady=8)
 
 
-# ---- barre laterale gauche (controle) + zone droite (debug) ----
+def section(parent, text):
+    tk.Label(parent, text=text, bg=C_BG, fg=C_FAINT,
+             font=(FONT, 8, "bold")).pack(anchor="w", pady=(0, 5))
+
+
+# ---- left column (control) + right column (inspection) ----
 main = tk.Frame(root, bg=C_BG)
 main.pack(fill="both", expand=True)
 
-left = tk.Frame(main, bg=C_BG, width=430)
-left.pack(side="left", fill="both", expand=False)
+left = tk.Frame(main, bg=C_BG, width=440)
+left.pack(side="left", fill="y", expand=False)
 left.pack_propagate(False)
 
-right = tk.Frame(main, bg=C_PANE, width=550)
+right = tk.Frame(main, bg=C_PANE)
 right.pack(side="right", fill="both", expand=True)
 
-# ================= COLONNE GAUCHE : CONTROLE =================
+# ================= LEFT COLUMN =================
 head = tk.Frame(left, bg=C_BG)
-head.pack(fill="x", padx=20, pady=(16, 0))
+head.pack(fill="x", padx=22, pady=(18, 2))
 tk.Label(head, text="TurtleBot3 Control", bg=C_BG, fg=C_TXT,
-         font=(FONT, 16, "bold")).pack(anchor="w")
-tk.Label(head, text="Formations · Errance · Dataset", bg=C_BG, fg=C_FAINT,
+         font=(FONT, 17, "bold")).pack(anchor="w")
+tk.Label(head, text="Formations · Wander · Dataset", bg=C_BG, fg=C_FAINT,
          font=(FONT, 9)).pack(anchor="w")
 
+# --- bottom block (pinned): data + STOP ---
+bottom = tk.Frame(left, bg=C_BG)
+bottom.pack(fill="x", side="bottom", padx=22, pady=(0, 16))
+hsep(bottom)
+dr = tk.Frame(bottom, bg=C_BG)
+dr.pack(fill="x", pady=(0, 6))
+tk.Button(dr, text="Pull data", command=ds_pull, bg=C_PANE, fg=C_TXT,
+          bd=0, font=(FONT, 9), cursor="hand2", activebackground=C_PANE2,
+          pady=6).pack(side="left", expand=True, fill="x", padx=(0, 3))
+tk.Button(dr, text="Delete", command=ds_clean, bg=C_PANE, fg=C_ERR,
+          bd=0, font=(FONT, 9), cursor="hand2", activebackground=C_ERRBG,
+          pady=6).pack(side="left", expand=True, fill="x", padx=(3, 0))
+stop_btn = tk.Button(bottom, text="STOP — kill everything", command=stop_everything,
+                     bg=C_ERR, fg="white", bd=0, font=(FONT, 11, "bold"),
+                     cursor="hand2", activebackground="#c43535", pady=9)
+stop_btn.pack(fill="x")
+
+# --- body (fills remaining space above the pinned bottom) ---
 body = tk.Frame(left, bg=C_BG)
-body.pack(fill="both", expand=True, padx=20, pady=10)
+body.pack(fill="both", expand=True, padx=22, pady=10)
 
-# --- Robots ---
-tk.Label(body, text="ROBOTS", bg=C_BG, fg=C_FAINT,
-         font=(FONT, 8, "bold")).pack(anchor="w", pady=(4, 4))
-
-present_vars, dots, space_lbl = {}, {}, {}
-state_dot, mode_lbl = {}, {}
+# Robots
+section(body, "ROBOTS")
+present_vars, dots, space_lbl, state_dot = {}, {}, {}, {}
 for i in ROBOTS:
     row = tk.Frame(body, bg=C_BG)
     row.pack(fill="x", pady=1)
-    # ping
     dots[i] = tk.Label(row, text="●", bg=C_BG, fg=C_FAINT, font=(FONT, 9))
     dots[i].pack(side="left")
-    # casque
     tk.Label(row, text="■", bg=C_BG, fg=HELMET_HEX[HELMETS[i]],
              font=(FONT, 11)).pack(side="left", padx=(4, 2))
-    # checkbox + nom
     v = tk.BooleanVar(value=False)
     present_vars[i] = v
     v.trace_add("write", refresh_info)
@@ -574,7 +708,6 @@ for i in ROBOTS:
                    selectcolor="#fff", activebackground=C_BG,
                    activeforeground=C_TXT, font=(FONT, 10),
                    anchor="w", width=10).pack(side="left")
-    # voyants M L C (pastilles compactes)
     st = tk.Frame(row, bg=C_BG)
     st.pack(side="left", padx=4)
     state_dot[i] = {}
@@ -583,45 +716,49 @@ for i in ROBOTS:
                       font=(MONO, 8, "bold"), width=2, height=1)
         lb.pack(side="left", padx=1)
         state_dot[i][key] = lb
-    # espace disque
     space_lbl[i] = tk.Label(row, text="—", bg=C_BG, fg=C_SUB,
                             font=(MONO, 8), width=5)
     space_lbl[i].pack(side="left", padx=(4, 0))
-    # actions rapides
     tk.Button(row, text="ZQSD", command=lambda i=i: teleop_robot(i),
               bg=C_PANE, fg=C_SUB, bd=0, font=(FONT, 8), cursor="hand2",
               activebackground=C_PANE2, padx=6).pack(side="right")
 
-tk.Button(body, text="Actualiser  ·  ping + espace disque", command=refresh_state,
+tk.Button(body, text="Refresh  ·  ping + free disk", command=refresh_state,
           bg=C_PANE, fg=C_SUB, bd=0, font=(FONT, 9), cursor="hand2",
           activebackground=C_PANE2, pady=5).pack(fill="x", pady=(8, 0))
 
 hsep(body)
 
-# --- Etape 1 : materiel ---
-tk.Label(body, text="1 · MATÉRIEL", bg=C_BG, fg=C_FAINT,
-         font=(FONT, 8, "bold")).pack(anchor="w", pady=(0, 4))
-r1 = tk.Frame(body, bg=C_BG)
-r1.pack(fill="x")
-tk.Button(r1, text="Démarrer le robot", command=bringup_start,
+# 1 · Build
+section(body, "1 · BUILD")
+tk.Button(body, text="Build + Deploy", command=build_deploy,
           bg=C_ACCENT, fg="white", bd=0, font=(FONT, 10, "bold"),
-          cursor="hand2", activebackground="#2a5f9a", pady=7).pack(
-    side="left", expand=True, fill="x", padx=(0, 4))
-tk.Button(r1, text="Couper", command=bringup_stop,
-          bg=C_PANE, fg=C_SUB, bd=0, font=(FONT, 9), cursor="hand2",
-          activebackground=C_PANE2, padx=12).pack(side="left")
+          cursor="hand2", activebackground=C_ACCENT_D, pady=8).pack(fill="x")
 
 hsep(body)
 
-# --- Etape 2 : mode ---
-tk.Label(body, text="2 · MODE", bg=C_BG, fg=C_FAINT,
-         font=(FONT, 8, "bold")).pack(anchor="w", pady=(0, 4))
-mode_var = tk.StringVar(value="errance")
+# 2 · Hardware
+section(body, "2 · HARDWARE")
+r1 = tk.Frame(body, bg=C_BG)
+r1.pack(fill="x")
+tk.Button(r1, text="Start robot", command=bringup_start,
+          bg=C_ACCENT, fg="white", bd=0, font=(FONT, 10, "bold"),
+          cursor="hand2", activebackground=C_ACCENT_D, pady=8).pack(
+    side="left", expand=True, fill="x", padx=(0, 4))
+tk.Button(r1, text="Stop", command=bringup_stop,
+          bg=C_PANE, fg=C_SUB, bd=0, font=(FONT, 9), cursor="hand2",
+          activebackground=C_PANE2, padx=14).pack(side="left")
+
+hsep(body)
+
+# 3 · Mode
+section(body, "3 · MODE")
+mode_var = tk.StringVar(value="wander")
 mode_var.trace_add("write", refresh_info)
 for val, txt, desc in (
-        ("errance", "Errance", "exploration autonome, évitement 0,16 m"),
-        ("cascade", "Cascade", "leader piloté + suiveurs couleur"),
-        ("dataset", "Dataset", "errance + enregistrement vidéo & lidar")):
+        ("wander", "Wander", "autonomous exploration, avoidance"),
+        ("cascade", "Cascade", "driven leader + color followers"),
+        ("dataset", "Dataset", "wander + video & lidar recording")):
     rr = tk.Frame(body, bg=C_BG)
     rr.pack(fill="x", pady=1)
     tk.Radiobutton(rr, variable=mode_var, value=val, bg=C_BG,
@@ -635,13 +772,13 @@ fr = tk.Frame(body, bg=C_BG)
 fr.pack(fill="x", pady=(6, 0))
 tk.Label(fr, text="Formation", bg=C_BG, fg=C_SUB,
          font=(FONT, 9)).pack(side="left")
-form_var = tk.StringVar(value="colonne")
+form_var = tk.StringVar(value="column")
 form_var.trace_add("write", refresh_info)
 form_combo = ttk.Combobox(fr, textvariable=form_var,
                           values=list(FORMATION_BEARINGS.keys()),
                           state="readonly", width=10, font=(FONT, 9))
 form_combo.pack(side="left", padx=6)
-tk.Button(fr, text="Appliquer à chaud", command=apply_formation,
+tk.Button(fr, text="Apply live", command=apply_formation,
           bg=C_PANE, fg=C_SUB, bd=0, font=(FONT, 8), cursor="hand2",
           activebackground=C_PANE2, padx=8).pack(side="left")
 
@@ -652,47 +789,26 @@ tk.Label(body, textvariable=info, bg=C_ACCENT_BG, fg=C_ACCENT,
 
 r2 = tk.Frame(body, bg=C_BG)
 r2.pack(fill="x", pady=(6, 0))
-launch_btn = tk.Button(r2, text="Lancer l'errance", command=behavior_start,
+launch_btn = tk.Button(r2, text="Start wander", command=behavior_start,
                        bg=C_OK, fg="white", bd=0, font=(FONT, 10, "bold"),
-                       cursor="hand2", activebackground="#3a6f52", pady=7)
+                       cursor="hand2", activebackground="#3a6f52", pady=8)
 launch_btn.pack(side="left", expand=True, fill="x", padx=(0, 4))
-tk.Button(r2, text="Couper le mode", command=lambda: behavior_stop(),
+tk.Button(r2, text="Stop mode", command=lambda: behavior_stop(),
           bg=C_PANE, fg=C_SUB, bd=0, font=(FONT, 9), cursor="hand2",
-          activebackground=C_PANE2, padx=12).pack(side="left")
+          activebackground=C_PANE2, padx=14).pack(side="left")
 
-# --- Bas de colonne : donnees + STOP + build ---
-bottom = tk.Frame(left, bg=C_BG)
-bottom.pack(fill="x", side="bottom", padx=20, pady=(0, 14))
-hsep(bottom)
-dr = tk.Frame(bottom, bg=C_BG)
-dr.pack(fill="x", pady=(0, 6))
-tk.Button(dr, text="Pull données", command=ds_pull, bg=C_PANE, fg=C_TXT,
-          bd=0, font=(FONT, 9), cursor="hand2", activebackground=C_PANE2,
-          pady=5).pack(side="left", expand=True, fill="x", padx=(0, 3))
-tk.Button(dr, text="Supprimer", command=ds_clean, bg=C_PANE, fg=C_ERR,
-          bd=0, font=(FONT, 9), cursor="hand2", activebackground=C_ERRBG,
-          pady=5).pack(side="left", expand=True, fill="x", padx=(3, 3))
-tk.Button(dr, text="Build+Deploy", command=build_deploy, bg=C_PANE,
-          fg=C_SUB, bd=0, font=(FONT, 9), cursor="hand2",
-          activebackground=C_PANE2, pady=5).pack(side="left", expand=True,
-                                                 fill="x", padx=(3, 0))
-stop_btn = tk.Button(bottom, text="STOP — tout arrêter", command=stop_everything,
-                     bg=C_ERR, fg="white", bd=0, font=(FONT, 10, "bold"),
-                     cursor="hand2", activebackground="#c43535", pady=8)
-stop_btn.pack(fill="x")
-
-# ================= COLONNE DROITE : DEBUG =================
+# ================= RIGHT COLUMN : INSPECTION =================
 tk.Label(right, text="INSPECTION", bg=C_PANE, fg=C_FAINT,
-         font=(FONT, 8, "bold")).pack(anchor="w", padx=16, pady=(14, 6))
+         font=(FONT, 8, "bold")).pack(anchor="w", padx=18, pady=(16, 6))
 
 nb = ttk.Notebook(right)
-nb.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+nb.pack(fill="both", expand=True, padx=14, pady=(0, 14))
 
-# --- Onglet Journal ---
+# --- Tab: Log ---
 tab_log = tk.Frame(nb, bg=C_BG)
-nb.add(tab_log, text="  Journal  ")
+nb.add(tab_log, text="   Log   ")
 journal = tk.Text(tab_log, bg=C_BG, fg=C_TXT, bd=0, font=(MONO, 9),
-                  state="disabled", wrap="word", padx=10, pady=8)
+                  state="disabled", wrap="word", padx=12, pady=10)
 journal.pack(fill="both", expand=True)
 journal.tag_configure("time", foreground=C_FAINT)
 journal.tag_configure("info", foreground=C_TXT)
@@ -700,84 +816,151 @@ journal.tag_configure("ok", foreground=C_OK)
 journal.tag_configure("warn", foreground=C_WARN)
 journal.tag_configure("err", foreground=C_ERR)
 
-# --- Onglet Caméra ---
+# --- Tab: Camera ---
+CAM_W, CAM_H = 640, 480
 tab_cam = tk.Frame(nb, bg=C_BG)
-nb.add(tab_cam, text="  Caméra  ")
+nb.add(tab_cam, text="   Camera   ")
 cam_top = tk.Frame(tab_cam, bg=C_BG)
-cam_top.pack(fill="x", padx=10, pady=8)
-tk.Label(cam_top, text="Robot", bg=C_BG, fg=C_SUB,
-         font=(FONT, 9)).pack(side="left")
+cam_top.pack(fill="x", padx=12, pady=(10, 4))
+tk.Label(cam_top, text="Robot", bg=C_BG, fg=C_SUB, font=(FONT, 9)).pack(side="left")
 cam_robot = tk.IntVar(value=1)
 for i in ROBOTS:
     tk.Radiobutton(cam_top, text=f"t{i}", variable=cam_robot, value=i,
                    bg=C_BG, fg=C_TXT, selectcolor="#fff",
                    activebackground=C_BG, font=(FONT, 9)).pack(side="left")
-tk.Label(cam_top, text="— image brute, sans traitement", bg=C_BG,
-         fg=C_FAINT, font=(FONT, 8)).pack(side="left", padx=6)
-cam_canvas = tk.Canvas(tab_cam, bg="#000", highlightthickness=1,
-                       highlightbackground=C_LINE, width=480, height=360)
-cam_canvas.pack(padx=10, pady=(0, 10))
-cam_info = tk.Label(tab_cam, text="", bg=C_BG, fg=C_SUB, font=(MONO, 9))
-cam_info.pack()
-
-# --- Onglet Lidar ---
-tab_lid = tk.Frame(nb, bg=C_BG)
-nb.add(tab_lid, text="  Lidar  ")
-lid_top = tk.Frame(tab_lid, bg=C_BG)
-lid_top.pack(fill="x", padx=10, pady=8)
-tk.Label(lid_top, text="Robot", bg=C_BG, fg=C_SUB,
+tk.Label(cam_top, text="   Color", bg=C_BG, fg=C_SUB,
          font=(FONT, 9)).pack(side="left")
+cam_color = tk.StringVar(value="yellow")
+ttk.Combobox(cam_top, textvariable=cam_color, values=list(COLORS_HSV.keys()),
+             state="readonly", width=8, font=(FONT, 9)).pack(side="left", padx=6)
+
+cam_canvas = tk.Canvas(tab_cam, bg="#000", highlightthickness=1,
+                       highlightbackground=C_LINE, width=CAM_W, height=CAM_H)
+cam_canvas.pack(padx=12, pady=(4, 6))
+
+cam_bar = tk.Frame(tab_cam, bg=C_BG)
+cam_bar.pack(fill="x", padx=12)
+cam_view = tk.IntVar(value=0)          # 0 Raw, 1 Detection, 2 Mask
+CAM_MODES = ["Raw", "Color detection", "Mask"]
+cam_mode_lbl = tk.Label(cam_bar, text=CAM_MODES[0], bg=C_BG, fg=C_ACCENT,
+                        font=(FONT, 9, "bold"), width=16, anchor="w")
+cam_mode_lbl.pack(side="right")
+tk.Scale(cam_bar, from_=0, to=2, orient="horizontal", variable=cam_view,
+         showvalue=False, resolution=1, length=300, bg=C_BG, fg=C_TXT,
+         troughcolor=C_PANE2, highlightthickness=0, sliderrelief="flat",
+         activebackground=C_ACCENT,
+         command=lambda _v: cam_mode_lbl.config(
+             text=CAM_MODES[int(cam_view.get())])).pack(side="left")
+cam_info = tk.Label(tab_cam, text="", bg=C_BG, fg=C_SUB, font=(MONO, 9))
+cam_info.pack(pady=(4, 0))
+
+# --- Tab: Lidar ---
+LID = 460
+tab_lid = tk.Frame(nb, bg=C_BG)
+nb.add(tab_lid, text="   Lidar   ")
+lid_top = tk.Frame(tab_lid, bg=C_BG)
+lid_top.pack(fill="x", padx=12, pady=(10, 4))
+tk.Label(lid_top, text="Robot", bg=C_BG, fg=C_SUB, font=(FONT, 9)).pack(side="left")
 lid_robot = tk.IntVar(value=1)
+lid_robot.trace_add("write", lambda *_: map_pts.clear())
 for i in ROBOTS:
     tk.Radiobutton(lid_top, text=f"t{i}", variable=lid_robot, value=i,
                    bg=C_BG, fg=C_TXT, selectcolor="#fff",
                    activebackground=C_BG, font=(FONT, 9)).pack(side="left")
-lid_canvas = tk.Canvas(tab_lid, bg="#fbfbfa", highlightthickness=1,
-                       highlightbackground=C_LINE, width=340, height=340)
-lid_canvas.pack(padx=10, pady=(0, 6))
-lid_info = tk.Label(tab_lid, text="", bg=C_BG, fg=C_SUB, font=(MONO, 9))
-lid_info.pack()
+tk.Button(lid_top, text="Clear map", command=lambda: map_pts.clear(),
+          bg=C_PANE, fg=C_SUB, bd=0, font=(FONT, 8), cursor="hand2",
+          activebackground=C_PANE2, padx=8).pack(side="right")
 
-# --- Onglet Topics ---
+lid_canvas = tk.Canvas(tab_lid, bg="#fbfbfa", highlightthickness=1,
+                       highlightbackground=C_LINE, width=LID, height=LID)
+lid_canvas.pack(padx=12, pady=(4, 6))
+
+lid_bar = tk.Frame(tab_lid, bg=C_BG)
+lid_bar.pack(fill="x", padx=12)
+lid_view = tk.IntVar(value=0)          # 0 Points, 1 Sectors, 2 Map
+LID_MODES = ["Points", "Sectors", "Map"]
+lid_mode_lbl = tk.Label(lid_bar, text=LID_MODES[0], bg=C_BG, fg=C_ACCENT,
+                        font=(FONT, 9, "bold"), width=10, anchor="w")
+lid_mode_lbl.pack(side="right")
+tk.Scale(lid_bar, from_=0, to=2, orient="horizontal", variable=lid_view,
+         showvalue=False, resolution=1, length=300, bg=C_BG, fg=C_TXT,
+         troughcolor=C_PANE2, highlightthickness=0, sliderrelief="flat",
+         activebackground=C_ACCENT,
+         command=lambda _v: lid_mode_lbl.config(
+             text=LID_MODES[int(lid_view.get())])).pack(side="left")
+lid_info = tk.Label(tab_lid, text="", bg=C_BG, fg=C_SUB, font=(MONO, 9))
+lid_info.pack(pady=(4, 0))
+map_pts = deque(maxlen=4000)           # accumulated world points for Map view
+
+# --- Tab: Topics ---
 tab_top = tk.Frame(nb, bg=C_BG)
-nb.add(tab_top, text="  Topics  ")
+nb.add(tab_top, text="   Topics   ")
 topics_txt = tk.Text(tab_top, bg=C_BG, fg=C_TXT, bd=0, font=(MONO, 9),
-                     state="disabled", wrap="none", padx=10, pady=8)
+                     state="disabled", wrap="none", padx=12, pady=10)
 topics_txt.pack(fill="both", expand=True)
 topics_txt.tag_configure("head", foreground=C_ACCENT, font=(MONO, 9, "bold"))
 topics_txt.tag_configure("dbl", foreground=C_ERR)
+topics_txt.tag_configure("info", foreground=C_TXT)
 
-# --- Onglet Noeuds ---
-tab_nodes = tk.Frame(nb, bg=C_BG)
-nb.add(tab_nodes, text="  Nœuds  ")
-nodes_txt = tk.Text(tab_nodes, bg=C_BG, fg=C_TXT, bd=0, font=(MONO, 9),
-                    state="disabled", wrap="word", padx=10, pady=8)
-nodes_txt.pack(fill="both", expand=True)
-nodes_txt.tag_configure("on", foreground=C_OK)
-nodes_txt.tag_configure("off", foreground=C_FAINT)
+# --- Tab: Dataset (settings) ---
+tab_ds = tk.Frame(nb, bg=C_BG)
+nb.add(tab_ds, text="   Dataset   ")
+tk.Label(tab_ds, text="RECORDING SETTINGS", bg=C_BG, fg=C_FAINT,
+         font=(FONT, 8, "bold")).pack(anchor="w", padx=16, pady=(16, 2))
+tk.Label(tab_ds, text="Applied when you start the Dataset mode.",
+         bg=C_BG, fg=C_FAINT, font=(FONT, 8)).pack(anchor="w", padx=16)
 
-# barre d'etat
-status = tk.StringVar(value="Prêt.")
+dur_var = tk.StringVar(value="120")
+seg_var = tk.StringVar(value="5")
+batt_var = tk.StringVar(value="11.0")
+disk_var = tk.StringVar(value="1.0")
+
+
+def ds_field(label, var, unit, hint=""):
+    row = tk.Frame(tab_ds, bg=C_BG)
+    row.pack(fill="x", padx=16, pady=4)
+    tk.Label(row, text=label, bg=C_BG, fg=C_TXT, font=(FONT, 10),
+             width=22, anchor="w").pack(side="left")
+    tk.Entry(row, textvariable=var, width=8, font=(MONO, 10), bg="#fff",
+             fg=C_TXT, relief="solid", bd=1, justify="right").pack(side="left")
+    tk.Label(row, text=" " + unit, bg=C_BG, fg=C_SUB,
+             font=(FONT, 9), width=4, anchor="w").pack(side="left")
+    if hint:
+        tk.Label(row, text=hint, bg=C_BG, fg=C_FAINT,
+                 font=(FONT, 8)).pack(side="left")
+
+
+tk.Frame(tab_ds, bg=C_LINE, height=1).pack(fill="x", padx=16, pady=(10, 6))
+ds_field("Recording duration", dur_var, "min", "0 = unlimited")
+ds_field("Segment length", seg_var, "min", "video file size")
+tk.Frame(tab_ds, bg=C_LINE, height=1).pack(fill="x", padx=16, pady=(10, 6))
+tk.Label(tab_ds, text="AUTO-STOP GUARDS", bg=C_BG, fg=C_FAINT,
+         font=(FONT, 8, "bold")).pack(anchor="w", padx=16, pady=(2, 4))
+ds_field("Stop if battery <", batt_var, "V", "0 = off")
+ds_field("Stop if storage <", disk_var, "GB", "0 = off")
+tk.Label(tab_ds, text="A guard trips → clean stop (segments closed), bringup kept.",
+         bg=C_BG, fg=C_FAINT, font=(FONT, 8), wraplength=520,
+         justify="left").pack(anchor="w", padx=16, pady=(12, 0))
+
+# status bar
+status = tk.StringVar(value="Ready.")
 tk.Label(root, textvariable=status, bg=C_PANE, fg=C_SUB, anchor="w",
-         font=(FONT, 9), padx=14, pady=4).pack(fill="x", side="bottom")
+         font=(FONT, 9), padx=16, pady=5).pack(fill="x", side="bottom")
 
 
-# ---------------- Rendus dynamiques ----------------
+# ---------------- Dynamic renders ----------------
 def update_state_lights():
     if hub is None:
         return
     for i in ROBOTS:
         tp = hub.topics_by_robot.get(i, set())
         base = f"/tortuga{i}/"
-        motors = f"{base}odom" in tp or f"{base}cmd_vel" in tp
-        lidar = f"{base}scan" in tp
-        cam = any(t.startswith(f"{base}camera") for t in tp)
-        for key, on in (("M", motors), ("L", lidar), ("C", cam)):
-            lb = state_dot[i][key]
-            if on:
-                lb.config(fg="white", bg=C_OK)
-            else:
-                lb.config(fg=C_FAINT, bg=C_PANE2)
+        checks = (("M", f"{base}odom" in tp or f"{base}cmd_vel" in tp),
+                  ("L", f"{base}scan" in tp),
+                  ("C", any(t.startswith(f"{base}camera") for t in tp)))
+        for key, on in checks:
+            state_dot[i][key].config(fg="white" if on else C_FAINT,
+                                     bg=C_OK if on else C_PANE2)
 
 
 def render_cam():
@@ -787,59 +970,145 @@ def render_cam():
     bgr = hub.frames.get(i)
     if bgr is None:
         cam_canvas.delete("all")
-        cam_canvas.create_text(240, 180, text="En attente du flux caméra…",
-                               fill="#888", font=(FONT, 10))
+        cam_canvas.create_text(CAM_W // 2, CAM_H // 2, text="Waiting for camera…",
+                               fill="#888", font=(FONT, 11))
         cam_info.config(text="")
         return
-    # AFFICHAGE BRUT : conversion BGR->RGB uniquement pour Tk (obligatoire),
-    # aucun autre traitement, aucun filtre, aucune detection dessinee.
     h, w = bgr.shape[:2]
-    scale = min(480 / w, 360 / h)
-    small = cv2.resize(bgr, (int(w * scale), int(h * scale)))
-    # PPM (P6) attend du RGB. imencode('.ppm') suppose du BGR en entree et
-    # ecrit du RGB correctement -> on passe le BGR d'origine tel quel.
-    ok, buf = cv2.imencode(".ppm", small)
-    if ok:
-        img = tk.PhotoImage(data=buf.tobytes())
+    view = int(cam_view.get())
+    color = cam_color.get()
+    out = bgr
+    tag = "raw"
+    if view == 1:                       # color detection overlay
+        out = bgr.copy()
+        mask = color_mask(bgr, color)
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        col = DRAW_BGR.get(color, (0, 220, 0))
+        if cnts:
+            c = max(cnts, key=cv2.contourArea)
+            if cv2.contourArea(c) > 200:
+                x, y, ww, hh = cv2.boundingRect(c)
+                cv2.rectangle(out, (x, y), (x + ww, y + hh), col, 2)
+                cx, cy = x + ww // 2, y + hh // 2
+                cv2.drawMarker(out, (cx, cy), col, cv2.MARKER_CROSS, 18, 2)
+        tag = f"detection ({color})"
+    elif view == 2:                     # binary mask
+        mask = color_mask(bgr, color)
+        out = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+        tag = f"mask ({color})"
+    scale = min(CAM_W / w, CAM_H / h)
+    disp = cv2.resize(out, (int(w * scale), int(h * scale)))
+    img = to_photo(disp)
+    if img is not None:
         cam_canvas._img = img
         cam_canvas.delete("all")
-        cam_canvas.create_image(240, 180, image=img)
-    cam_info.config(text=f"tortuga{i}   {w}×{h}   flux brut")
+        cam_canvas.create_image(CAM_W // 2, CAM_H // 2, image=img)
+    cam_info.config(text=f"tortuga{i}   {w}×{h}   {tag}")
+
+
+def _lidar_base_img():
+    img = np.full((LID, LID, 3), 251, np.uint8)
+    return img
 
 
 def render_lidar():
     if hub is None:
         return
     i = lid_robot.get()
-    lid_canvas.delete("all")
     msg = hub.scans.get(i)
+    view = int(lid_view.get())
     if msg is None or not msg.ranges or msg.angle_increment == 0.0:
-        lid_canvas.create_text(170, 170, text="En attente du scan…",
-                               fill="#999", font=(FONT, 10))
+        lid_canvas.delete("all")
+        lid_canvas.create_text(LID // 2, LID // 2, text="Waiting for scan…",
+                               fill="#999", font=(FONT, 11))
         lid_info.config(text="")
         return
-    cx, cy, sc = 170, 170, 75.0
-    for rad in (0.5, 1.0, 1.5):
-        r = rad * sc
-        lid_canvas.create_oval(cx-r, cy-r, cx+r, cy+r, outline=C_LINE)
-    rs = SAFETY * sc
-    lid_canvas.create_oval(cx-rs, cy-rs, cx+rs, cy+rs, outline=C_ERR)
-    lid_canvas.create_text(cx+rs+4, cy, text=f"{SAFETY:.2f} m", fill=C_ERR,
-                           anchor="w", font=(FONT, 7))
-    lid_canvas.create_line(cx, cy, cx, cy-26, fill=C_ACCENT, width=2)
-    r = np.array(msg.ranges)
-    ok = np.isfinite(r) & (r > 0.06) & (r < 2.0)
+    r = np.array(msg.ranges, dtype=float)
+    r[np.isinf(r) | np.isnan(r)] = 0.0
     ang = msg.angle_min + np.arange(len(r)) * msg.angle_increment
-    for a, d in zip(ang[ok], r[ok]):
-        x = cx - math.sin(a) * d * sc
-        y = cy - math.cos(a) * d * sc
-        col = C_ERR if d < SAFETY + 0.05 else C_ACCENT
-        lid_canvas.create_oval(x-1, y-1, x+1, y+1, fill=col, outline="")
-    lid_canvas.create_oval(cx-3, cy-3, cx+3, cy+3, fill=C_TXT, outline="")
-    av = sector_min(msg, 0, 20)
-    fav = "—" if av >= 90 else f"{av:.2f} m"
-    warn = "   ⚠ obstacle" if av < SAFETY + 0.05 else ""
-    lid_info.config(text=f"tortuga{i}   avant {fav}{warn}")
+    cx = cy = LID // 2
+
+    if view == 2:                       # ---- Map (accumulated in world frame) ----
+        img = _lidar_base_img()
+        pose = hub.odom.get(i)
+        good = (r > 0.06) & (r < 3.5)
+        if pose is not None and np.any(good):
+            x, y, th = pose
+            px = r[good] * np.cos(ang[good])
+            py = r[good] * np.sin(ang[good])
+            wx = x + px * math.cos(th) - py * math.sin(th)
+            wy = y + px * math.sin(th) + py * math.cos(th)
+            for k in range(0, len(wx), 2):     # downsample when adding
+                map_pts.append((wx[k], wy[k]))
+        if map_pts:
+            arr = np.array(map_pts)
+            mnx, mxx = arr[:, 0].min(), arr[:, 0].max()
+            mny, mxy = arr[:, 1].min(), arr[:, 1].max()
+            span = max(mxx - mnx, mxy - mny, 1.0)
+            sc = (LID - 60) / span
+            ox = (mnx + mxx) / 2.0
+            oy = (mny + mxy) / 2.0
+            for wx0, wy0 in map_pts:
+                u = int(cx + (wx0 - ox) * sc)
+                vv = int(cy - (wy0 - oy) * sc)
+                if 0 <= u < LID and 0 <= vv < LID:
+                    cv2.circle(img, (u, vv), 1, (170, 120, 40), -1)
+            if hub.odom.get(i) is not None:
+                x, y, th = hub.odom[i]
+                u = int(cx + (x - ox) * sc)
+                vv = int(cy - (y - oy) * sc)
+                cv2.circle(img, (u, vv), 5, (60, 60, 220), -1)
+                cv2.line(img, (u, vv),
+                         (int(u + 16 * math.cos(-th)), int(vv + 16 * math.sin(-th))),
+                         (60, 60, 220), 2)
+        lid_info.config(text=f"tortuga{i}   map · {len(map_pts)} pts   (Clear to reset)")
+        img_ppm = to_photo(img)
+        if img_ppm is not None:
+            lid_canvas._img = img_ppm
+            lid_canvas.delete("all")
+            lid_canvas.create_image(cx, cy, image=img_ppm)
+        return
+
+    img = _lidar_base_img()
+    sc = 82.0
+    for rad in (0.5, 1.0, 1.5, 2.0):
+        cv2.circle(img, (cx, cy), int(rad * sc), (227, 227, 224), 1)
+    cv2.circle(img, (cx, cy), int(SAFETY * sc), (62, 62, 224), 1)
+
+    if view == 1:                       # ---- Sectors ----
+        for lbl, ctr in (("F", 0), ("L", 90), ("R", -90), ("B", 180)):
+            d = sector_min(msg, ctr, 35)
+            a = math.radians(ctr)
+            ux, uy = -math.sin(a), -math.cos(a)
+            col = (62, 62, 224) if d < SAFETY + 0.05 else (179, 111, 47)
+            ex, ey = int(cx + ux * min(d, 2.0) * sc), int(cy + uy * min(d, 2.0) * sc)
+            cv2.line(img, (cx, cy), (ex, ey), col, 3)
+            tx, ty = int(cx + ux * 2.15 * sc), int(cy + uy * 2.15 * sc)
+            txt = "-" if d >= 90 else f"{d:.2f}"
+            cv2.putText(img, f"{lbl}:{txt}",
+                        (tx - 26, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1,
+                        cv2.LINE_AA)
+        front = sector_min(msg, 0, 20)
+        lid_info.config(text=f"tortuga{i}   sectors   front "
+                             + ("—" if front >= 90 else f"{front:.2f} m"))
+    else:                               # ---- Points ----
+        good = (r > 0.06) & (r < 2.0)
+        for a, d in zip(ang[good], r[good]):
+            u = int(cx - math.sin(a) * d * sc)
+            vv = int(cy - math.cos(a) * d * sc)
+            col = (62, 62, 224) if d < SAFETY + 0.05 else (179, 111, 47)
+            cv2.circle(img, (u, vv), 1, col, -1)
+        front = sector_min(msg, 0, 20)
+        lid_info.config(text=f"tortuga{i}   points   front "
+                             + ("—" if front >= 90 else f"{front:.2f} m"))
+
+    cv2.circle(img, (cx, cy), 3, (47, 42, 43), -1)
+    cv2.line(img, (cx, cy), (cx, cy - 24), (179, 111, 47), 2)
+    img_ppm = to_photo(img)
+    if img_ppm is not None:
+        lid_canvas._img = img_ppm
+        lid_canvas.delete("all")
+        lid_canvas.create_image(cx, cy, image=img_ppm)
 
 
 def render_topics():
@@ -860,51 +1129,21 @@ def render_topics():
             topics_txt.insert("end", f"   {short}{flag}\n", tag)
         topics_txt.insert("end", "\n")
     if not any(hub.topics_by_robot.values()):
-        topics_txt.insert("end", "Aucun topic détecté.\n"
-                          "Démarre un robot, puis patiente ~3 s.\n", "info")
+        topics_txt.insert("end", "No topic detected.\n"
+                          "Start a robot, then wait ~3 s.\n", "info")
     topics_txt.configure(state="disabled")
-
-
-def render_nodes():
-    # Etat deduit des topics (leger, sans SSH) : quels comportements tournent.
-    if hub is None:
-        return
-    nodes_txt.configure(state="normal")
-    nodes_txt.delete("1.0", "end")
-    for i in ROBOTS:
-        tp = hub.topics_by_robot.get(i, set())
-        base = f"/tortuga{i}/"
-        checks = [
-            ("bringup (moteurs)", f"{base}odom" in tp),
-            ("lidar", f"{base}scan" in tp),
-            ("caméra", any(t.startswith(f"{base}camera") for t in tp)),
-        ]
-        line_on = any(c[1] for c in checks)
-        nodes_txt.insert("end", f"tortuga{i}   ",
-                         "on" if line_on else "off")
-        parts = []
-        for label, on in checks:
-            parts.append(("● " if on else "○ ") + label)
-        nodes_txt.insert("end", "   ".join(parts) + "\n",
-                         "on" if line_on else "off")
-    nodes_txt.insert("end", "\n○ = absent    ● = actif (déduit des topics)\n",
-                     "off")
-    nodes_txt.configure(state="disabled")
 
 
 def tick():
     try:
         update_state_lights()
-        cur = nb.index(nb.select())
-        # 0 Journal, 1 Camera, 2 Lidar, 3 Topics, 4 Noeuds
+        cur = nb.index(nb.select())     # 0 Log, 1 Cam, 2 Lidar, 3 Topics, 4 Dataset
         if cur == 1:
             render_cam()
         elif cur == 2:
             render_lidar()
         elif cur == 3:
             render_topics()
-        elif cur == 4:
-            render_nodes()
     except Exception:
         pass
     root.after(200, tick)
@@ -914,13 +1153,13 @@ def deferred_start():
     if hub is not None:
         hub.start()
     refresh_state()
-    log("Interface prête.", "ok")
+    log("Interface ready.", "ok")
 
 
 hub = Hub() if ROS_OK else None
 refresh_info()
 if not ROS_OK:
-    log("ROS non sourcé : inspection caméra/lidar/topics inactive.", "warn")
+    log("ROS not sourced: camera/lidar/topics inspection inactive.", "warn")
 root.after(300, deferred_start)
 root.after(400, tick)
 root.mainloop()

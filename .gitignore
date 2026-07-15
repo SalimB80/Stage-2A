@@ -3,3 +3,5 @@ install/
 log/
 /dataset_collected
 /src/formation_control/tools/dataset_collected
+/dataset_collected_week1
+*.zip

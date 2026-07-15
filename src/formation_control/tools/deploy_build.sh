@@ -12,6 +12,16 @@ for i in "${ROBOTS[@]}"; do
   ip="192.168.0.20$i"
   echo "=== [$user @ $ip] copie du package ==="
   sshpass -p "$PW" rsync -az --delete \
+    --exclude='dataset_collected/' \
+    --exclude='dataset/' \
+    --exclude='__pycache__/' \
+    --exclude='build/' \
+    --exclude='install/' \
+    --exclude='log/' \
+    --exclude='*.avi' \
+    --exclude='*.mp4' \
+    --exclude='*.bag' \
+    --exclude='*.db3' \
     -e "ssh -o StrictHostKeyChecking=no" \
     "$PKG/" "$user@$ip:~/formation_ws/src/formation_control/"
 
