@@ -44,14 +44,13 @@ def generate_launch_description():
 
             Node(
                 package='camera_ros', executable='camera_node', name='camera',
-                # Dataset : 640x480 @ 30 fps FIABLE. 33333 us/image = 30 fps.
-                # (Le 59 fps -> 16971 saturait le CPU du Pi -> camera/recorder
-                # plantaient -> enregistrement en morceaux. 30 fps stable donne
-                # un dataset COMPLET, ce qui vaut mieux qu'un pic de fps perdu.)
-                # Ne pas descendre sous 16971 (rejete). La borne force l'auto-expo
-                # a une pose courte (compense en gain). Le recorder mesure le FPS.
+                # Dataset : 640x480 @ 55 fps. 18181 us/image = 55 fps (au-dessus
+                # du plancher hardware 16971, donc valide). Le recorder ecrit les
+                # JPEG NATIFS (image_raw/compressed) sans re-encoder -> le Pi
+                # tient 55 fps la ou un re-encodage video plafonnait a ~30.
+                # La borne force l'auto-expo a une pose courte (compense en gain).
                 parameters=[{'format': 'BGR888', 'width': 640, 'height': 480,
-                             'FrameDurationLimits': [33333, 33333]}],
+                             'FrameDurationLimits': [18181, 18181]}],
                 remappings=[('~/image_raw', 'camera/image_raw')],
             ),
 

@@ -20,6 +20,8 @@ import subprocess
 import threading
 import time
 import math
+import os
+import json
 
 ROS_OK = True
 try:
@@ -40,7 +42,8 @@ ROBOTS = {
     3: ("tortuga3", "192.168.0.203"),
     4: ("tortuga4", "192.168.0.204"),
 }
-HELMETS = {1: "yellow", 2: "red", 3: "cyan", 4: "yellow"}
+HELMETS = {1: "yellow", 2: "red", 3: "green", 4: "blue"}
+COLOR_NAMES = ["yellow", "red", "green", "blue", "cyan"]
 FORMATION_BEARINGS = {
     "column": [0, 0, 0], "line": [30, -30, 30],
     "triangle": [25, -25, 0], "square": [20, -20, 0],
@@ -50,15 +53,20 @@ SAFETY = 0.16
 PW = "1234"
 ROS_DOMAIN_ID = 30
 DATASET_SH = "./src/formation_control/tools/dataset_tools.sh"
+CONFIG_PATH = os.path.expanduser("~/.tb3_control_gui.json")
 
 # HSV color presets for the camera "detection"/"mask" views (OpenCV HSV).
 COLORS_HSV = {
     "yellow": [((20, 80, 80), (35, 255, 255))],
-    "cyan":   [((85, 80, 80), (100, 255, 255))],
     "red":    [((0, 100, 80), (8, 255, 255)),
                ((172, 100, 80), (179, 255, 255))],
+    "green":  [((40, 70, 60), (85, 255, 255))],
+    "blue":   [((100, 120, 60), (130, 255, 255))],
+    "cyan":   [((85, 80, 80), (100, 255, 255))],
 }
-DRAW_BGR = {"yellow": (0, 200, 220), "red": (40, 40, 220), "cyan": (200, 190, 0)}
+DRAW_BGR = {"yellow": (0, 200, 220), "red": (40, 40, 220),
+            "green": (60, 190, 60), "blue": (220, 120, 40),
+            "cyan": (200, 190, 0)}
 
 # ---------------- Palette (clean, one accent) ----------------
 C_BG = "#ffffff"
@@ -75,7 +83,8 @@ C_OK = "#448361"
 C_WARN = "#d9730d"
 C_ERR = "#e03e3e"
 C_ERRBG = "#fbecec"
-HELMET_HEX = {"yellow": "#dfab01", "red": "#e03e3e", "cyan": "#2fa8b3"}
+HELMET_HEX = {"yellow": "#dfab01", "red": "#e03e3e", "green": "#3aa35a",
+              "blue": "#3b6fd0", "cyan": "#2fa8b3"}
 
 FONT = "Segoe UI"
 MONO = "Cascadia Mono"
@@ -128,6 +137,7 @@ class Hub:
         self.scans = {}           # idx -> LaserScan
         self.odom = {}            # idx -> (x, y, yaw)
         self.battery = {}         # idx -> voltage (V), for dataset auto-stop
+        self.batt_pct = {}        # idx -> percentage (raw, may be 0-1 or 0-100)
         self.topics_by_robot = {i: set() for i in ROBOTS}
         self.topic_types = {}
         self.subbed = set()
@@ -185,8 +195,7 @@ class Hub:
                         "sensor_msgs/msg/BatteryState" in types:
                     self.node.create_subscription(
                         BatteryState, name,
-                        lambda m, i=idx: self.battery.__setitem__(i, m.voltage),
-                        10)
+                        lambda m, i=idx: self._batt(i, m), 10)
                     self.subbed.add(name)
         self.topics_by_robot = seen
 
@@ -205,6 +214,10 @@ class Hub:
         yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
                          1.0 - 2.0 * (q.y * q.y + q.z * q.z))
         self.odom[idx] = (p.x, p.y, yaw)
+
+    def _batt(self, idx, msg):
+        self.battery[idx] = msg.voltage
+        self.batt_pct[idx] = msg.percentage
 
 
 # ---------------- Small helpers ----------------
@@ -306,6 +319,10 @@ def refresh_info(*_):
                  + ", ".join(f"t{i}" for i in present))
     else:
         info.set("Dataset video + lidar — " + ", ".join(f"t{i}" for i in present))
+    try:
+        update_formation()
+    except Exception:
+        pass
 
 
 # ---------------- State (ping + disk) ----------------
@@ -339,6 +356,13 @@ def apply_state(res):
     for i, (ok, free) in res.items():
         dots[i].configure(fg=C_OK if ok else C_ERR)
         space_lbl[i].config(text=free)
+        p = batt_pct(i)
+        if p is None:
+            batt_lbl[i].config(text="—", fg=C_SUB)
+        else:
+            batt_lbl[i].config(
+                text=f"{p:.0f}%",
+                fg=C_ERR if p < 20 else (C_WARN if p < 40 else C_OK))
     log("State refreshed.", "ok")
 
 
@@ -356,9 +380,10 @@ def bringup_start():
                f"ros2 run camera_ros camera_node "
                f"--ros-args -r __ns:=/tortuga{i} -r __node:=camera "
                f"-p format:=BGR888 -p width:=640 -p height:=480 "
-               # 640x480 @ 30 fps (reliable). No space in the array (a space
-               # splits the argument -> ignored). 59 fps saturated the Pi CPU.
-               f"-p FrameDurationLimits:=[33333,33333] "
+               # 640x480 @ 55 fps : 18181 us/image. No space in the array (a
+               # space splits the argument -> ignored). The recorder stores the
+               # native JPEG frames (no re-encode) so the Pi holds 55 fps.
+               f"-p FrameDurationLimits:=[18181,18181] "
                f"-r ~/image_raw:=camera/image_raw")
     log("Bringup + camera started: " + ", ".join(f"t{i}" for i in present)
         + " (~15 s to boot).", "ok")
@@ -419,10 +444,21 @@ def behavior_start():
                     root.after(0, lambda r=rob:
                                log(f"t{r} = leader (drive it with ZQSD)."))
                     continue
+                # Single-range color -> push the tuned HSV as a custom filter
+                # (so the HSV Tuner values actually apply). Multi-range (red)
+                # -> use the named preset in tracker_node.
+                ranges = COLORS_HSV.get(color, [])
+                if len(ranges) == 1:
+                    lo, hi = ranges[0]
+                    cspec = (f"-p target_color:=custom "
+                             f"-p hsv_low:=[{lo[0]},{lo[1]},{lo[2]}] "
+                             f"-p hsv_high:=[{hi[0]},{hi[1]},{hi[2]}]")
+                else:
+                    cspec = f"-p target_color:={color}"
                 ssh_bg(rob, robot_env() +
                        f"ros2 run formation_control tracker "
                        f"--ros-args -r __ns:=/tortuga{rob} "
-                       f"-p target_color:={color} -p desired_bearing:={bear} "
+                       f"{cspec} -p desired_bearing:={bear} "
                        f"-p target_distance:={TARGET_DISTANCE}")
             root.after(0, lambda: log(f"Cascade started ({form}).", "ok"))
         else:
@@ -496,16 +532,16 @@ def guard_loop():
     while dataset_guard["active"]:
         reason = None
         dur = parse_num(dur_var.get())      # min ; 0 = unlimited
-        batt = parse_num(batt_var.get())    # V  ; 0 = disabled
+        batt = parse_num(batt_var.get())    # %  ; 0 = disabled
         disk = parse_num(disk_var.get())    # GB ; 0 = disabled
         targets_ = present_indices() or list(ROBOTS)
         if dur > 0 and (time.time() - dataset_guard["t0"]) >= dur * 60:
             reason = f"duration {dur:.0f} min reached"
-        if reason is None and hub is not None and batt > 0:
+        if reason is None and batt > 0:
             for i in targets_:
-                v = hub.battery.get(i)
-                if v is not None and 0.5 < v < batt:
-                    reason = f"tortuga{i} battery low ({v:.1f} V)"
+                p = batt_pct(i)
+                if p is not None and p < batt:
+                    reason = f"tortuga{i} battery low ({p:.0f}%)"
                     break
         if reason is None and disk > 0:
             for i in targets_:
@@ -515,10 +551,29 @@ def guard_loop():
                     break
         if reason:
             dataset_guard["active"] = False
-            root.after(0, lambda r=reason: (
-                log(f"AUTO-STOP dataset: {r}", "warn"), behavior_stop()))
+            tg = list(targets_)
+            root.after(0, lambda r=reason, t=tg: _auto_stop(r, t))
             return
         time.sleep(15)
+
+
+def _auto_stop(reason, tg):
+    # 1) close the recording cleanly (SIGTERM recorder/rosbag), stop wander.
+    log(f"AUTO-STOP dataset: {reason} — closing files then SHUTTING DOWN.", "warn")
+    behavior_stop()
+
+    # 2) after a short flush delay, power OFF the robots (clean poweroff).
+    #    Data lives on the SD card and survives the shutdown.
+    def later():
+        time.sleep(5)
+        root.after(0, lambda: shutdown_robots(tg))
+    threading.Thread(target=later, daemon=True).start()
+
+
+def shutdown_robots(idxs):
+    for i in idxs:
+        ssh_bg(i, f"echo {PW} | sudo -S shutdown -h now")
+    log("Shutdown sent (poweroff): " + ", ".join(f"t{i}" for i in idxs), "warn")
 
 
 def apply_formation():
@@ -537,6 +592,33 @@ def teleop_robot(idx):
                      f"ros2 run formation_control teleop_zqsd tortuga{idx}",
                      f"Manual: teleop_zqsd tortuga{idx}"):
         log(f"ZQSD teleop tortuga{idx} (new window).")
+
+
+def halt_robot(idx):
+    # Publish a single zero Twist on /tortugaX/cmd_vel (instant motion halt).
+    # NB: if wander/tracker is still running it keeps publishing cmd_vel and
+    # will override this — use "Stop mode" to end the behavior for good.
+    twist = ('"{linear: {x: 0.0, y: 0.0, z: 0.0}, '
+             'angular: {x: 0.0, y: 0.0, z: 0.0}}"')
+    cmd = (pc_env() + f"ros2 topic pub --once /tortuga{idx}/cmd_vel "
+           f"geometry_msgs/msg/Twist {twist}")
+    subprocess.Popen(["bash", "-c", cmd],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    log(f"Halt sent to tortuga{idx}.", "warn")
+
+
+def batt_pct(i):
+    """Battery percentage for robot i, or None. Handles 0-1 and 0-100 drivers,
+    with a voltage-based fallback for a 3S LiPo (~10.0 V empty, 12.6 V full)."""
+    if hub is None:
+        return None
+    p = hub.batt_pct.get(i)
+    if p is not None and p > 0:
+        return p * 100.0 if p <= 1.0 else p
+    v = hub.battery.get(i)
+    if v is not None and v > 0.5:
+        return max(0.0, min(100.0, (v - 10.0) / (12.6 - 10.0) * 100.0))
+    return None
 
 
 # ---------------- Full STOP & build ----------------
@@ -621,6 +703,172 @@ def ds_clean():
     log(f"Delete started (robots {idx}).", "warn")
 
 
+# ---------------- Settings persistence ----------------
+def _cfg_read():
+    try:
+        with open(CONFIG_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _cfg_write(d):
+    try:
+        with open(CONFIG_PATH, "w") as f:
+            json.dump(d, f, indent=2)
+        return True
+    except Exception as e:
+        log(f"Could not write config: {e}", "err")
+        return False
+
+
+def save_settings():
+    d = _cfg_read()
+    d.update({"duration": dur_var.get(), "segment": seg_var.get(),
+              "battery": batt_var.get(), "storage": disk_var.get(),
+              "helmets": {str(i): HELMETS[i] for i in ROBOTS}})
+    if _cfg_write(d):
+        log(f"Settings saved to {CONFIG_PATH}.", "ok")
+
+
+def load_settings():
+    d = _cfg_read()
+    dur_var.set(d.get("duration", dur_var.get()))
+    seg_var.set(d.get("segment", seg_var.get()))
+    batt_var.set(d.get("battery", batt_var.get()))
+    disk_var.set(d.get("storage", disk_var.get()))
+    for i in ROBOTS:
+        c = d.get("helmets", {}).get(str(i))
+        if c in COLORS_HSV:
+            HELMETS[i] = c
+
+
+def save_hsv():
+    d = _cfg_read()
+    d["hsv"] = {k: [[list(a), list(b)] for a, b in v]
+                for k, v in COLORS_HSV.items()}
+    if _cfg_write(d):
+        log("HSV presets saved.", "ok")
+
+
+def load_hsv():
+    d = _cfg_read()
+    for k, ranges in d.get("hsv", {}).items():
+        try:
+            COLORS_HSV[k] = [(tuple(a), tuple(b)) for a, b in ranges]
+        except Exception:
+            pass
+
+
+def load_helmets():
+    d = _cfg_read()
+    for i in ROBOTS:
+        c = d.get("helmets", {}).get(str(i))
+        if c in COLORS_HSV:
+            HELMETS[i] = c
+
+
+# ---------------- HSV tuner window ----------------
+def open_hsv_tuner():
+    win = tk.Toplevel(root)
+    win.title("HSV Tuner")
+    win.configure(bg=C_BG)
+    win.geometry("560x560")
+
+    top = tk.Frame(win, bg=C_BG)
+    top.pack(fill="x", padx=14, pady=10)
+    tk.Label(top, text="Preset", bg=C_BG, fg=C_SUB, font=(FONT, 9)).pack(side="left")
+    preset = tk.StringVar(value=cam_color.get() if cam_color.get() in COLORS_HSV
+                          else COLOR_NAMES[0])
+    ttk.Combobox(top, textvariable=preset, values=COLOR_NAMES,
+                 state="readonly", width=8).pack(side="left", padx=6)
+    tk.Label(top, text="   Robot", bg=C_BG, fg=C_SUB,
+             font=(FONT, 9)).pack(side="left")
+    rob = tk.IntVar(value=cam_robot.get())
+    for i in ROBOTS:
+        tk.Radiobutton(top, text=f"t{i}", variable=rob, value=i, bg=C_BG,
+                       fg=C_TXT, selectcolor="#fff", activebackground=C_BG,
+                       font=(FONT, 9)).pack(side="left")
+
+    names = ["H low", "S low", "V low", "H high", "S high", "V high"]
+    maxes = [179, 255, 255, 179, 255, 255]
+    svars = [tk.IntVar() for _ in range(6)]
+    for n, mx, var in zip(names, maxes, svars):
+        r = tk.Frame(win, bg=C_BG)
+        r.pack(fill="x", padx=14)
+        tk.Label(r, text=n, width=7, anchor="w", bg=C_BG, fg=C_TXT,
+                 font=(FONT, 9)).pack(side="left")
+        tk.Scale(r, from_=0, to=mx, orient="horizontal", variable=var,
+                 length=380, bg=C_BG, fg=C_TXT, troughcolor=C_PANE2,
+                 highlightthickness=0, sliderrelief="flat").pack(side="left")
+
+    prev = tk.Frame(win, bg=C_BG)
+    prev.pack(pady=8)
+    c_img = tk.Canvas(prev, width=248, height=186, bg="#000",
+                      highlightthickness=1, highlightbackground=C_LINE)
+    c_img.grid(row=0, column=0, padx=4)
+    c_mask = tk.Canvas(prev, width=248, height=186, bg="#000",
+                       highlightthickness=1, highlightbackground=C_LINE)
+    c_mask.grid(row=0, column=1, padx=4)
+    val_lbl = tk.Label(win, text="", bg=C_BG, fg=C_SUB, font=(MONO, 9))
+    val_lbl.pack()
+
+    def cur_range():
+        v = [x.get() for x in svars]
+        return ((v[0], v[1], v[2]), (v[3], v[4], v[5]))
+
+    def load_preset(*_):
+        rng = COLORS_HSV.get(preset.get(), [((0, 0, 0), (0, 0, 0))])[0]
+        (hl, sl, vl), (hh, sh, vh) = rng
+        for var, val in zip(svars, [hl, sl, vl, hh, sh, vh]):
+            var.set(int(val))
+
+    preset.trace_add("write", load_preset)
+
+    def do_save():
+        COLORS_HSV[preset.get()] = [cur_range()]   # single range (per tuner)
+        save_hsv()
+        lo, hi = cur_range()
+        log(f"HSV saved for {preset.get()}: low={list(lo)} high={list(hi)}", "ok")
+
+    btns = tk.Frame(win, bg=C_BG)
+    btns.pack(pady=8)
+    tk.Button(btns, text="Apply + Save", command=do_save, bg=C_ACCENT,
+              fg="white", bd=0, font=(FONT, 10, "bold"), cursor="hand2",
+              activebackground=C_ACCENT_D, padx=14, pady=6).pack(side="left")
+    tk.Label(win, text="Red wraps H=0/179 (two ranges); the tuner edits a single "
+             "range — keep red's presets or edit tracker_node for the 2nd range.",
+             bg=C_BG, fg=C_FAINT, font=(FONT, 8), wraplength=520).pack(padx=14)
+
+    load_preset()
+
+    def loop():
+        if not win.winfo_exists():
+            return
+        lo, hi = cur_range()
+        val_lbl.config(text=f"low={list(lo)}   high={list(hi)}")
+        if hub is not None and ROS_OK:
+            bgr = hub.frames.get(rob.get())
+            if bgr is not None:
+                small = cv2.resize(bgr, (248, 186))
+                im = to_photo(small)
+                if im:
+                    c_img._img = im
+                    c_img.delete("all")
+                    c_img.create_image(124, 93, image=im)
+                hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+                mask = cv2.inRange(hsv, np.array(lo, np.uint8),
+                                   np.array(hi, np.uint8))
+                mk = to_photo(cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR))
+                if mk:
+                    c_mask._img = mk
+                    c_mask.delete("all")
+                    c_mask.create_image(124, 93, image=mk)
+        win.after(130, loop)
+
+    loop()
+
+
 # ============================================================
 #                        INTERFACE
 # ============================================================
@@ -629,6 +877,10 @@ root.title("TurtleBot3 Control")
 root.geometry("1220x880")
 root.configure(bg=C_BG)
 root.minsize(1120, 820)
+
+# Load persisted HSV presets + helmet colors before building the UI.
+load_hsv()
+load_helmets()
 
 style = ttk.Style(root)
 style.theme_use("clam")
@@ -693,21 +945,23 @@ body.pack(fill="both", expand=True, padx=22, pady=10)
 
 # Robots
 section(body, "ROBOTS")
-present_vars, dots, space_lbl, state_dot = {}, {}, {}, {}
+present_vars, dots, space_lbl, batt_lbl, state_dot, helmet_sw = \
+    {}, {}, {}, {}, {}, {}
 for i in ROBOTS:
     row = tk.Frame(body, bg=C_BG)
     row.pack(fill="x", pady=1)
     dots[i] = tk.Label(row, text="●", bg=C_BG, fg=C_FAINT, font=(FONT, 9))
     dots[i].pack(side="left")
-    tk.Label(row, text="■", bg=C_BG, fg=HELMET_HEX[HELMETS[i]],
-             font=(FONT, 11)).pack(side="left", padx=(4, 2))
+    helmet_sw[i] = tk.Label(row, text="■", bg=C_BG,
+                            fg=HELMET_HEX[HELMETS[i]], font=(FONT, 11))
+    helmet_sw[i].pack(side="left", padx=(4, 2))
     v = tk.BooleanVar(value=False)
     present_vars[i] = v
     v.trace_add("write", refresh_info)
     tk.Checkbutton(row, text=f"tortuga{i}", variable=v, bg=C_BG, fg=C_TXT,
                    selectcolor="#fff", activebackground=C_BG,
-                   activeforeground=C_TXT, font=(FONT, 10),
-                   anchor="w", width=10).pack(side="left")
+                   activeforeground=C_TXT, font=(FONT, 9),
+                   anchor="w", width=9).pack(side="left")
     st = tk.Frame(row, bg=C_BG)
     st.pack(side="left", padx=4)
     state_dot[i] = {}
@@ -717,13 +971,19 @@ for i in ROBOTS:
         lb.pack(side="left", padx=1)
         state_dot[i][key] = lb
     space_lbl[i] = tk.Label(row, text="—", bg=C_BG, fg=C_SUB,
-                            font=(MONO, 8), width=5)
+                            font=(MONO, 8), width=5, anchor="e")
     space_lbl[i].pack(side="left", padx=(4, 0))
+    batt_lbl[i] = tk.Label(row, text="—", bg=C_BG, fg=C_SUB,
+                           font=(MONO, 8), width=4, anchor="e")
+    batt_lbl[i].pack(side="left", padx=(2, 0))
     tk.Button(row, text="ZQSD", command=lambda i=i: teleop_robot(i),
               bg=C_PANE, fg=C_SUB, bd=0, font=(FONT, 8), cursor="hand2",
-              activebackground=C_PANE2, padx=6).pack(side="right")
+              activebackground=C_PANE2, padx=5).pack(side="right")
+    tk.Button(row, text="Halt", command=lambda i=i: halt_robot(i),
+              bg=C_ERRBG, fg=C_ERR, bd=0, font=(FONT, 8), cursor="hand2",
+              activebackground="#f6dede", padx=5).pack(side="right", padx=(0, 3))
 
-tk.Button(body, text="Refresh  ·  ping + free disk", command=refresh_state,
+tk.Button(body, text="Refresh  ·  ping + disk + battery", command=refresh_state,
           bg=C_PANE, fg=C_SUB, bd=0, font=(FONT, 9), cursor="hand2",
           activebackground=C_PANE2, pady=5).pack(fill="x", pady=(8, 0))
 
@@ -902,6 +1162,82 @@ topics_txt.tag_configure("head", foreground=C_ACCENT, font=(MONO, 9, "bold"))
 topics_txt.tag_configure("dbl", foreground=C_ERR)
 topics_txt.tag_configure("info", foreground=C_TXT)
 
+# --- Tab: Formation (cascade chain editor) ---
+tab_form = tk.Frame(nb, bg=C_BG)
+nb.add(tab_form, text="   Formation   ")
+tk.Label(tab_form, text="CASCADE CHAIN", bg=C_BG, fg=C_FAINT,
+         font=(FONT, 8, "bold")).pack(anchor="w", padx=16, pady=(16, 2))
+tk.Label(tab_form, text="Each robot follows the helmet color of the robot "
+         "ahead of it. Set who wears which color:",
+         bg=C_BG, fg=C_FAINT, font=(FONT, 8), wraplength=520,
+         justify="left").pack(anchor="w", padx=16)
+
+helmet_var, form_sw = {}, {}
+
+
+def on_helmet(i):
+    HELMETS[i] = helmet_var[i].get()
+    hexc = HELMET_HEX.get(HELMETS[i], C_TXT)
+    form_sw[i].config(fg=hexc)
+    if i in helmet_sw:
+        helmet_sw[i].config(fg=hexc)
+    update_formation()
+    refresh_info()
+
+
+hrows = tk.Frame(tab_form, bg=C_BG)
+hrows.pack(fill="x", padx=16, pady=(8, 4))
+for i in ROBOTS:
+    r = tk.Frame(hrows, bg=C_BG)
+    r.pack(fill="x", pady=2)
+    form_sw[i] = tk.Label(r, text="■", fg=HELMET_HEX[HELMETS[i]], bg=C_BG,
+                          font=(FONT, 12))
+    form_sw[i].pack(side="left", padx=(0, 6))
+    tk.Label(r, text=f"tortuga{i} wears", width=15, anchor="w", bg=C_BG,
+             fg=C_TXT, font=(FONT, 10)).pack(side="left")
+    helmet_var[i] = tk.StringVar(value=HELMETS[i])
+    cb = ttk.Combobox(r, textvariable=helmet_var[i], values=COLOR_NAMES,
+                      state="readonly", width=8, font=(FONT, 9))
+    cb.pack(side="left", padx=6)
+    cb.bind("<<ComboboxSelected>>", lambda e, i=i: on_helmet(i))
+
+tk.Frame(tab_form, bg=C_LINE, height=1).pack(fill="x", padx=16, pady=(10, 6))
+tk.Label(tab_form, text="RESULTING CHAIN  (uses the selected robots, in order)",
+         bg=C_BG, fg=C_FAINT, font=(FONT, 8, "bold")).pack(anchor="w", padx=16)
+form_txt = tk.Text(tab_form, bg=C_BG, fg=C_TXT, bd=0, font=(MONO, 9), height=6,
+                   state="disabled", padx=12, pady=6, wrap="word")
+form_txt.pack(fill="x", padx=12, pady=(2, 0))
+
+frow = tk.Frame(tab_form, bg=C_BG)
+frow.pack(fill="x", padx=16, pady=(12, 4))
+tk.Button(frow, text="HSV Tuner…", command=open_hsv_tuner, bg=C_ACCENT,
+          fg="white", bd=0, font=(FONT, 10, "bold"), cursor="hand2",
+          activebackground=C_ACCENT_D, padx=14, pady=6).pack(side="left")
+tk.Button(frow, text="Save chain", command=save_settings, bg=C_PANE, fg=C_TXT,
+          bd=0, font=(FONT, 9), cursor="hand2", activebackground=C_PANE2,
+          padx=12, pady=6).pack(side="left", padx=8)
+tk.Label(tab_form, text="HSV Tuner: dial in each color filter live (camera + "
+         "mask preview) and save the presets.",
+         bg=C_BG, fg=C_FAINT, font=(FONT, 8), wraplength=520,
+         justify="left").pack(anchor="w", padx=16, pady=(4, 0))
+
+
+def update_formation():
+    order = present_indices() or list(ROBOTS)
+    form_txt.configure(state="normal")
+    form_txt.delete("1.0", "end")
+    for pos, i in enumerate(order):
+        c = HELMETS[i]
+        if pos == 0:
+            form_txt.insert("end", f"tortuga{i}  ({c})   →  LEADER (drive ZQSD)\n")
+        else:
+            pj = order[pos - 1]
+            form_txt.insert("end",
+                            f"tortuga{i}  ({c})   →  follows tortuga{pj} "
+                            f"({HELMETS[pj]})\n")
+    form_txt.configure(state="disabled")
+
+
 # --- Tab: Dataset (settings) ---
 tab_ds = tk.Frame(nb, bg=C_BG)
 nb.add(tab_ds, text="   Dataset   ")
@@ -912,8 +1248,9 @@ tk.Label(tab_ds, text="Applied when you start the Dataset mode.",
 
 dur_var = tk.StringVar(value="120")
 seg_var = tk.StringVar(value="5")
-batt_var = tk.StringVar(value="11.0")
+batt_var = tk.StringVar(value="20")     # percent
 disk_var = tk.StringVar(value="1.0")
+load_settings()                          # override with saved config if present
 
 
 def ds_field(label, var, unit, hint=""):
@@ -936,11 +1273,17 @@ ds_field("Segment length", seg_var, "min", "video file size")
 tk.Frame(tab_ds, bg=C_LINE, height=1).pack(fill="x", padx=16, pady=(10, 6))
 tk.Label(tab_ds, text="AUTO-STOP GUARDS", bg=C_BG, fg=C_FAINT,
          font=(FONT, 8, "bold")).pack(anchor="w", padx=16, pady=(2, 4))
-ds_field("Stop if battery <", batt_var, "V", "0 = off")
+ds_field("Stop if battery <", batt_var, "%", "0 = off")
 ds_field("Stop if storage <", disk_var, "GB", "0 = off")
-tk.Label(tab_ds, text="A guard trips → clean stop (segments closed), bringup kept.",
+tk.Button(tab_ds, text="Save settings", command=save_settings,
+          bg=C_ACCENT, fg="white", bd=0, font=(FONT, 10, "bold"),
+          cursor="hand2", activebackground=C_ACCENT_D, pady=7).pack(
+    anchor="w", padx=16, pady=(16, 4))
+tk.Label(tab_ds, text="When a guard trips: recording is closed cleanly, then "
+         "the robots are POWERED OFF (clean shutdown — data stays on the SD "
+         "card, pull it after powering back on).",
          bg=C_BG, fg=C_FAINT, font=(FONT, 8), wraplength=520,
-         justify="left").pack(anchor="w", padx=16, pady=(12, 0))
+         justify="left").pack(anchor="w", padx=16, pady=(10, 0))
 
 # status bar
 status = tk.StringVar(value="Ready.")

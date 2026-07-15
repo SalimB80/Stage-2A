@@ -59,12 +59,12 @@ case $CMD in
     ;;
   drain)
     # Vide le disque des robots EN CONTINU pendant l'enregistrement.
-    # Principe : le recorder ecrit des segments fermes ; le fichier en cours
-    # d'ecriture est modifie en permanence (60 fps), les segments TERMINES ne
-    # le sont plus. On selectionne donc ce qui n'a pas ete modifie depuis >1
-    # min (-mmin +1) -> jamais le segment actif -> on rapatrie puis on SUPPRIME
-    # du robot (uniquement apres un rsync reussi). Ainsi le disque des Pi reste
-    # a ~1-2 segments et on peut filmer a 60 fps sans limite de duree.
+    # Le recorder ecrit des DOSSIERS de segment (*_segNN/ pleins de .jpg). Le
+    # dossier en cours est modifie en permanence (nouvelles images), les
+    # segments TERMINES ne le sont plus. On selectionne les dossiers non
+    # modifies depuis >1 min (-mmin +1) -> jamais le segment actif -> on
+    # rapatrie puis on SUPPRIME du robot (seulement apres un rsync reussi).
+    # Ainsi le disque des Pi reste a ~1-2 segments : capture 55 fps sans limite.
     # Intervalle reglable : DRAIN_INTERVAL=90 ./dataset_tools.sh drain 2 3
     INTERVAL=${DRAIN_INTERVAL:-120}
     mkdir -p ./dataset_collected
@@ -72,25 +72,24 @@ case $CMD in
     while true; do
       for i in "${IDX[@]}"; do
         mkdir -p ./dataset_collected/tortuga$i
-        # segments termines (video + csv) non modifies depuis >1 min
-        FILES=$(run_ssh $i "find ~/dataset -maxdepth 1 -type f \
-                \( -name '*.avi' -o -name '*.csv' \) -mmin +1 -printf '%f\n' \
-                2>/dev/null")
-        [ -z "$FILES" ] && continue
-        n=$(echo "$FILES" | grep -c . )
-        echo "=== tortuga$i : $n fichier(s) termine(s) a rapatrier ==="
-        while IFS= read -r f; do
-          [ -z "$f" ] && continue
+        # dossiers de segment termines (non modifies depuis >1 min)
+        DIRS=$(run_ssh $i "find ~/dataset -maxdepth 1 -type d -name '*_seg*' \
+                -mmin +1 -printf '%f\n' 2>/dev/null")
+        [ -z "$DIRS" ] && continue
+        n=$(echo "$DIRS" | grep -c . )
+        echo "=== tortuga$i : $n segment(s) termine(s) a rapatrier ==="
+        while IFS= read -r d; do
+          [ -z "$d" ] && continue
           if sshpass -p $PW rsync -az \
                -e "ssh -o StrictHostKeyChecking=no" \
-               tortuga$i@192.168.0.20$i:~/dataset/"$f" \
+               tortuga$i@192.168.0.20$i:~/dataset/"$d" \
                ./dataset_collected/tortuga$i/ ; then
-            run_ssh $i "rm -f ~/dataset/'$f'"   # purge SEULEMENT si rsync OK
-            echo "  ok + purge : $f"
+            run_ssh $i "rm -rf ~/dataset/'$d'"  # purge SEULEMENT si rsync OK
+            echo "  ok + purge : $d"
           else
-            echo "  echec transfert (conserve sur le robot) : $f"
+            echo "  echec transfert (conserve sur le robot) : $d"
           fi
-        done <<< "$FILES"
+        done <<< "$DIRS"
       done
       sleep "$INTERVAL"
     done
