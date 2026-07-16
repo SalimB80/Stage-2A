@@ -70,13 +70,7 @@ def generate_launch_description():
                              'scan_topic': 'scan', 'mode': 'mapping'}],
             ),
         ]),
-
-        ExecuteProcess(
-            condition=IfCondition(record),
-            cmd=['bash', '-c',
-                 ['mkdir -p ~/dataset && exec ros2 bag record '
-                  '-o ~/dataset/bag_$(date +%Y%m%d_%H%M%S)_', ns,
-                  ' /', ns, '/scan /', ns, '/odom /', ns, '/imu']],
-            output='screen',
-        ),
+        # No rosbag: the recorder writes camera JPEGs + scan.csv + odom.csv
+        # itself (timestamped, human-readable) -> lighter on the Pi, and the
+        # CSVs are the directly-exploitable dataset layer.
     ])

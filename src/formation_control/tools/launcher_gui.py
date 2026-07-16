@@ -28,7 +28,8 @@ try:
     import rclpy
     from rclpy.node import Node as RosNode
     from rclpy.qos import qos_profile_sensor_data
-    from sensor_msgs.msg import LaserScan, CompressedImage, BatteryState
+    from sensor_msgs.msg import (LaserScan, CompressedImage, BatteryState,
+                                 CameraInfo)
     from nav_msgs.msg import Odometry
     import numpy as np
     import cv2
@@ -138,11 +139,25 @@ class Hub:
         self.odom = {}            # idx -> (x, y, yaw)
         self.battery = {}         # idx -> voltage (V), for dataset auto-stop
         self.batt_pct = {}        # idx -> percentage (raw, may be 0-1 or 0-100)
+        # last time (monotonic-ish, time.time()) a message actually arrived —
+        # used for a TRUE liveness M/L/C (topic existence lingers in DDS after
+        # the publisher dies, so it is NOT a reliable "alive" signal).
+        self.t_scan = {}
+        self.t_img = {}
+        self.t_odom = {}
+        self.t_cam = {}           # camera_info arrival (tiny) -> C liveness
         self.topics_by_robot = {i: set() for i in ROBOTS}
         self.topic_types = {}
         self.subbed = set()
         self.node = None
         self.started = False
+        # Camera stream is heavy (55 fps): subscribe to ONE robot at a time,
+        # and only while the Camera tab is open. Pulling all 4 at once saturates
+        # the WiFi (SSH timeouts, M/L/C flicker, jerky control). want_cam is set
+        # by the UI; the ROS thread reconciles the single active subscription.
+        self.want_cam = None
+        self.cam_idx = None
+        self.cam_sub = None
 
     def start(self):
         if self.started or not ROS_OK:
@@ -156,6 +171,7 @@ class Hub:
                 rclpy.init()
             self.node = RosNode("gui_hub")
             self.node.create_timer(2.0, self._discover)
+            self.node.create_timer(0.4, self._reconcile_cam)
             rclpy.spin(self.node)
         except Exception as e:
             print(f"[hub ROS off] {e}")
@@ -172,17 +188,11 @@ class Hub:
                 seen[idx].add(name)
                 if name in self.subbed:
                     continue
-                if name.endswith("image_raw/compressed") and \
-                        "sensor_msgs/msg/CompressedImage" in types:
-                    self.node.create_subscription(
-                        CompressedImage, name,
-                        lambda m, i=idx: self._img(i, m), qos_profile_sensor_data)
-                    self.subbed.add(name)
-                elif name.endswith("/scan") and \
+                if name.endswith("/scan") and \
                         "sensor_msgs/msg/LaserScan" in types:
                     self.node.create_subscription(
                         LaserScan, name,
-                        lambda m, i=idx: self.scans.__setitem__(i, m),
+                        lambda m, i=idx: self._scan(i, m),
                         qos_profile_sensor_data)
                     self.subbed.add(name)
                 elif name.endswith("/odom") and \
@@ -197,9 +207,41 @@ class Hub:
                         BatteryState, name,
                         lambda m, i=idx: self._batt(i, m), 10)
                     self.subbed.add(name)
+                elif name.endswith("/camera/camera_info") and \
+                        "sensor_msgs/msg/CameraInfo" in types:
+                    # tiny message at camera rate -> cheap C liveness without
+                    # pulling the heavy image stream.
+                    self.node.create_subscription(
+                        CameraInfo, name,
+                        lambda m, i=idx: self.t_cam.__setitem__(i, time.time()),
+                        qos_profile_sensor_data)
+                    self.subbed.add(name)
         self.topics_by_robot = seen
 
+    def _reconcile_cam(self):
+        """Keep exactly one compressed-camera subscription (the one the UI wants),
+        or none. Runs in the ROS thread -> safe to create/destroy subs here."""
+        if self.node is None or self.want_cam == self.cam_idx:
+            return
+        if self.cam_sub is not None:
+            try:
+                self.node.destroy_subscription(self.cam_sub)
+            except Exception:
+                pass
+            self.cam_sub = None
+        self.cam_idx = self.want_cam
+        if self.cam_idx is not None:
+            topic = f"/tortuga{self.cam_idx}/camera/image_raw/compressed"
+            self.cam_sub = self.node.create_subscription(
+                CompressedImage, topic,
+                lambda m, i=self.cam_idx: self._img(i, m), qos_profile_sensor_data)
+
+    def _scan(self, idx, msg):
+        self.scans[idx] = msg
+        self.t_scan[idx] = time.time()
+
     def _img(self, idx, msg):
+        self.t_img[idx] = time.time()
         try:
             arr = np.frombuffer(msg.data, np.uint8)
             bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -209,6 +251,7 @@ class Hub:
             pass
 
     def _odom(self, idx, msg):
+        self.t_odom[idx] = time.time()
         p = msg.pose.pose.position
         q = msg.pose.pose.orientation
         yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
@@ -467,15 +510,13 @@ def behavior_start():
                        f"ros2 run formation_control wander "
                        f"--ros-args -r __ns:=/tortuga{i}")
                 if m == "dataset":
+                    # recorder writes camera JPEGs + scan.csv + odom.csv itself
+                    # (timestamped) -> no rosbag needed, lighter on the Pi.
                     ssh_bg(i, robot_env() +
                            f"ros2 run formation_control recorder "
                            f"--ros-args -r __ns:=/tortuga{i} "
                            f"-p robot_name:=tortuga{i} "
                            f"-p segment_minutes:={seg_minutes}")
-                    ssh_bg(i, robot_env() +
-                           f"mkdir -p ~/dataset && ros2 bag record "
-                           f"-o ~/dataset/bag_$(date +%Y%m%d_%H%M%S)_tortuga{i} "
-                           f"/tortuga{i}/scan /tortuga{i}/odom /tortuga{i}/imu")
             msg = ("Dataset started (recording!): " if m == "dataset"
                    else "Wander started: ") + ", ".join(f"t{i}" for i in present)
             root.after(0, lambda msg=msg: log(msg, "ok"))
@@ -558,16 +599,20 @@ def guard_loop():
 
 
 def _auto_stop(reason, tg):
-    # 1) close the recording cleanly (SIGTERM recorder/rosbag), stop wander.
-    log(f"AUTO-STOP dataset: {reason} — closing files then SHUTTING DOWN.", "warn")
+    # Always close the recording cleanly (SIGTERM recorder/rosbag, stop wander).
     behavior_stop()
-
-    # 2) after a short flush delay, power OFF the robots (clean poweroff).
-    #    Data lives on the SD card and survives the shutdown.
-    def later():
-        time.sleep(5)
-        root.after(0, lambda: shutdown_robots(tg))
-    threading.Thread(target=later, daemon=True).start()
+    # Only power OFF the robots if the user explicitly enabled it (off by
+    # default -> no surprise fleet shutdown while testing).
+    if shutdown_var.get():
+        log(f"AUTO-STOP dataset: {reason} — closing files then SHUTTING DOWN.",
+            "warn")
+        def later():
+            time.sleep(5)
+            root.after(0, lambda: shutdown_robots(tg))
+        threading.Thread(target=later, daemon=True).start()
+    else:
+        log(f"AUTO-STOP dataset: {reason} — recording stopped (bringup kept, "
+            f"no shutdown).", "warn")
 
 
 def shutdown_robots(idxs):
@@ -669,7 +714,9 @@ def build_deploy():
                 ["bash", "-c",
                  "cd ~/formation_ws && colcon build --symlink-install && "
                  "source install/setup.bash && "
-                 f"./src/formation_control/tools/deploy_build.sh {idxs}"],
+                 # 'bash <script>' (not './<script>') so a missing +x bit or a
+                 # CRLF shebang can never block the deploy again.
+                 f"bash ./src/formation_control/tools/deploy_build.sh {idxs}"],
                 capture_output=True, text=True, timeout=240)
             if r.returncode == 0:
                 root.after(0, lambda: log("Build + deploy done.", "ok"))
@@ -686,7 +733,7 @@ def build_deploy():
 # ---------------- Data ----------------
 def ds_pull():
     idx = " ".join(map(str, targets()))
-    open_terminal(pc_env() + f"cd ~/formation_ws && {DATASET_SH} collect {idx}; "
+    open_terminal(pc_env() + f"cd ~/formation_ws && bash {DATASET_SH} collect {idx}; "
                   "echo; echo '=== Done. Enter ==='; read",
                   "Manual: dataset_tools.sh collect")
     log(f"Pull started (robots {idx}).")
@@ -1093,6 +1140,12 @@ tk.Label(cam_top, text="   Color", bg=C_BG, fg=C_SUB,
 cam_color = tk.StringVar(value="yellow")
 ttk.Combobox(cam_top, textvariable=cam_color, values=list(COLORS_HSV.keys()),
              state="readonly", width=8, font=(FONT, 9)).pack(side="left", padx=6)
+# Explicit LIVE toggle (default OFF): the heavy 55 fps stream is pulled only
+# when this is checked -> no accidental WiFi flood by clicking the tab.
+cam_live = tk.BooleanVar(value=False)
+tk.Checkbutton(cam_top, text="LIVE", variable=cam_live, bg=C_BG, fg=C_ERR,
+               selectcolor="#fff", activebackground=C_BG,
+               font=(FONT, 9, "bold")).pack(side="right")
 
 cam_canvas = tk.Canvas(tab_cam, bg="#000", highlightthickness=1,
                        highlightbackground=C_LINE, width=CAM_W, height=CAM_H)
@@ -1127,6 +1180,10 @@ for i in ROBOTS:
     tk.Radiobutton(lid_top, text=f"t{i}", variable=lid_robot, value=i,
                    bg=C_BG, fg=C_TXT, selectcolor="#fff",
                    activebackground=C_BG, font=(FONT, 9)).pack(side="left")
+lid_live = tk.BooleanVar(value=False)
+tk.Checkbutton(lid_top, text="LIVE", variable=lid_live, bg=C_BG, fg=C_ERR,
+               selectcolor="#fff", activebackground=C_BG,
+               font=(FONT, 9, "bold")).pack(side="right")
 tk.Button(lid_top, text="Clear map", command=lambda: map_pts.clear(),
           bg=C_PANE, fg=C_SUB, bd=0, font=(FONT, 8), cursor="hand2",
           activebackground=C_PANE2, padx=8).pack(side="right")
@@ -1275,13 +1332,21 @@ tk.Label(tab_ds, text="AUTO-STOP GUARDS", bg=C_BG, fg=C_FAINT,
          font=(FONT, 8, "bold")).pack(anchor="w", padx=16, pady=(2, 4))
 ds_field("Stop if battery <", batt_var, "%", "0 = off")
 ds_field("Stop if storage <", disk_var, "GB", "0 = off")
+
+shutdown_var = tk.BooleanVar(value=False)
+srow = tk.Frame(tab_ds, bg=C_BG)
+srow.pack(fill="x", padx=16, pady=(8, 2))
+tk.Checkbutton(srow, text="Power OFF robots on auto-stop (poweroff)",
+               variable=shutdown_var, bg=C_BG, fg=C_TXT, selectcolor="#fff",
+               activebackground=C_BG, font=(FONT, 10)).pack(side="left")
+
 tk.Button(tab_ds, text="Save settings", command=save_settings,
           bg=C_ACCENT, fg="white", bd=0, font=(FONT, 10, "bold"),
           cursor="hand2", activebackground=C_ACCENT_D, pady=7).pack(
     anchor="w", padx=16, pady=(16, 4))
-tk.Label(tab_ds, text="When a guard trips: recording is closed cleanly, then "
-         "the robots are POWERED OFF (clean shutdown — data stays on the SD "
-         "card, pull it after powering back on).",
+tk.Label(tab_ds, text="When a guard trips: recording is always closed cleanly "
+         "(segments valid). The robots are only POWERED OFF if the box above is "
+         "checked — otherwise the bringup stays up so you can pull right away.",
          bg=C_BG, fg=C_FAINT, font=(FONT, 8), wraplength=520,
          justify="left").pack(anchor="w", padx=16, pady=(10, 0))
 
@@ -1295,12 +1360,15 @@ tk.Label(root, textvariable=status, bg=C_PANE, fg=C_SUB, anchor="w",
 def update_state_lights():
     if hub is None:
         return
+    now = time.time()
+
+    def fresh(d, i):                 # data received in the last 3 s = alive
+        return (i in d) and (now - d[i] < 3.0)
+
     for i in ROBOTS:
-        tp = hub.topics_by_robot.get(i, set())
-        base = f"/tortuga{i}/"
-        checks = (("M", f"{base}odom" in tp or f"{base}cmd_vel" in tp),
-                  ("L", f"{base}scan" in tp),
-                  ("C", any(t.startswith(f"{base}camera") for t in tp)))
+        checks = (("M", fresh(hub.t_odom, i)),   # bringup/motors publishing odom
+                  ("L", fresh(hub.t_scan, i)),   # lidar publishing scan
+                  ("C", fresh(hub.t_cam, i)))    # camera_info (camera alive)
         for key, on in checks:
             state_dot[i][key].config(fg="white" if on else C_FAINT,
                                      bg=C_OK if on else C_PANE2)
@@ -1308,6 +1376,13 @@ def update_state_lights():
 
 def render_cam():
     if hub is None:
+        return
+    if not cam_live.get():
+        cam_canvas.delete("all")
+        cam_canvas.create_text(CAM_W // 2, CAM_H // 2,
+                               text="Camera stream OFF — check LIVE to view",
+                               fill="#888", font=(FONT, 11))
+        cam_info.config(text="(no WiFi bandwidth used while OFF)")
         return
     i = cam_robot.get()
     bgr = hub.frames.get(i)
@@ -1356,6 +1431,13 @@ def _lidar_base_img():
 
 def render_lidar():
     if hub is None:
+        return
+    if not lid_live.get():
+        lid_canvas.delete("all")
+        lid_canvas.create_text(LID // 2, LID // 2,
+                               text="Lidar view OFF — check LIVE to view",
+                               fill="#999", font=(FONT, 11))
+        lid_info.config(text="")
         return
     i = lid_robot.get()
     msg = hub.scans.get(i)
@@ -1481,6 +1563,11 @@ def tick():
     try:
         update_state_lights()
         cur = nb.index(nb.select())     # 0 Log, 1 Cam, 2 Lidar, 3 Topics, 4 Dataset
+        # Heavy camera stream: only when the Camera tab is open AND its LIVE
+        # box is checked, for the displayed robot -> no accidental WiFi flood.
+        if hub is not None:
+            hub.want_cam = cam_robot.get() if (cur == 1 and cam_live.get()) \
+                else None
         if cur == 1:
             render_cam()
         elif cur == 2:
