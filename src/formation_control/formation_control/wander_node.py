@@ -24,18 +24,16 @@ class WanderNode(Node):
         super().__init__("wander")
         self.declare_parameter("v_forward", 0.12)
         self.declare_parameter("w_turn", 0.8)
-        self.declare_parameter("critical_dist", 0.28)
-        self.declare_parameter("obstacle_dist", 0.60)   # ralentit / prepare virage
-        self.declare_parameter("safety_dist", 0.32)     # DOUBLE de l'ancien 0.16 :
+        self.declare_parameter("critical_dist", 0.22)
+        self.declare_parameter("obstacle_dist", 0.50)   # seuil d'arret devant obstacle
+        self.declare_parameter("safety_dist", 0.26)     # recul UNIQUEMENT si plus
         #   le lidar voit le point le plus proche de l'AUTRE robot, mais MON
         #   chassis depasse devant mon lidar ET le sien depasse aussi -> a 0.16 m
         #   lidar, les carrosseries se touchent presque. Deux corps de ~16 cm +
         #   robots en mouvement (vitesse de rapprochement) -> on garde 0.32 m
         #   mini au lidar. On ne descend jamais sous cette limite.
-        self.declare_parameter("pause_time", 2.0)       # s d'arret quand obstacle
-        #   (on espere qu'il bouge avant de contourner).
-        self.declare_parameter("wait_clear_time", 2.0)  # s : si toujours bloque
-        #   apres la pause, on considere l'obstacle fixe -> on contourne.
+        self.declare_parameter("pause_time", 1.0)       # 1 s d'arret : "attends,
+        #   ca bouge ?" ; si oui on repart, si non on change de direction.
         self.declare_parameter("front_deg", 25.0)       # demi-secteur frontal etroit
         self.declare_parameter("avoid_deg", 45.0)       # demi-cone LARGE (body-aware)
         #   Le robot est un cube 16x16 cm (demi-diagonale ~0.11 m). En rotation,
@@ -46,9 +44,9 @@ class WanderNode(Node):
         # --- Errance continue (meandre) : au lieu d'un seul a-coup toutes les
         # 5 s, on applique une vitesse de rotation aleatoire QUI DURE et se
         # renouvelle souvent -> trajectoire sinueuse, exploration reguliere.
-        self.declare_parameter("wander_w_max", 0.5)     # amplitude du meandre
-        self.declare_parameter("wander_min_s", 3.0)     # duree mini d'un cap (x2.5)
-        self.declare_parameter("wander_max_s", 6.5)     # duree maxi d'un cap (x2.6)
+        self.declare_parameter("wander_w_max", 0.35)    # amplitude du meandre (doux)
+        self.declare_parameter("wander_min_s", 3.5)     # cap tenu longtemps
+        self.declare_parameter("wander_max_s", 7.0)     # -> balade fluide
         #   Caps tenus plus longtemps -> le robot avance plus longtemps dans une
         #   meme direction (marche plus droite, moins de changements de cap).
 
@@ -163,55 +161,41 @@ class WanderNode(Node):
 
         safety = self.get_parameter("safety_dist").value
         pause_t = self.get_parameter("pause_time").value
-        wait_t = self.get_parameter("wait_clear_time").value
-        clear = safety + radius        # marge minimale tenant compte du corps
 
-        # --- EVITEMENT en 3 temps (securite 0.16, corps 16 cm) ---
-        # 1) obstacle proche -> ARRET (2 s) en esperant qu'il bouge.
-        # 2) on attend encore un peu, immobile.
-        # 3) toujours la -> on CONTOURNE : rotation vers le cote le plus
-        #    degage, MAINTENUE jusqu'a ce que le cone LARGE soit libre (=>
-        #    l'obstacle passe sur le cote, camera ~parallele, coin degage).
+        # --- EVITEMENT en 2 temps, FLUIDE (pas de va-et-vient) ---
+        # 1) obstacle devant -> ARRET NET 1 s : "attends, est-ce que ca bouge ?"
+        #    (immobile ; on ne recule QUE si vraiment colle < safety).
+        # 2) toujours la apres 1 s -> on TOURNE sur place (sens verrouille vers
+        #    le cote le plus degage) jusqu'a ce que le cone large soit libre,
+        #    puis on repart avec un NOUVEAU cap. Rotation pure = zero begaiement.
         blocked = d_front < obst
         if blocked:
             if self.pause_since is None:
                 self.pause_since = now
+                self.avoid_dir = 1.0 if d_left > d_right else -1.0  # choisi 1 fois
             waited = (now - self.pause_since).nanoseconds / 1e9
 
             if waited < pause_t:
-                # temps 1 : arret complet (on ne s'approche pas plus)
+                # temps 1 : arret complet, on observe (espoir que ca degage)
                 self.state = "PAUSE"
-                if d_front < clear + 0.03:      # trop pres : petit recul
-                    t.linear.x = -0.05
+                if d_front < safety:            # colle : petit recul de securite
+                    t.linear.x = -0.06
                 self.cmd_pub.publish(t)
                 return
-            elif waited < pause_t + wait_t:
-                # temps 2 : on attend encore, immobile
-                self.state = "WAIT"
-                self.cmd_pub.publish(t)
-                return
-            else:
-                # temps 3 : contournement. On VERROUILLE le sens de rotation
-                # (vers le plus degage) pour ne pas osciller, et on tourne
-                # jusqu'a ce que le cone large soit franchement libre.
-                self.state = "REROUTE"
-                if self.avoid_dir == 0.0:
-                    self.avoid_dir = 1.0 if d_left > d_right else -1.0
-                # Le coin balaie un cercle de rayon ~radius : si un point est
-                # trop pres (devant large OU du cote vers lequel on tourne),
-                # on recule un peu en tournant pour ne pas frotter le coin.
-                d_turnside = d_left if self.avoid_dir > 0 else d_right
-                if min(d_wide, d_turnside) < clear:
-                    t.linear.x = -0.05
-                t.angular.z = w * self.avoid_dir
-                # degage seulement quand le CONE LARGE est libre au-dela de
-                # obstacle_dist -> l'obstacle est bien passe sur le cote.
-                if d_wide > obst:
-                    self.pause_since = None
-                    self.avoid_dir = 0.0
-                    self.state = "FORWARD"
-                self.cmd_pub.publish(t)
-                return
+
+            # temps 2 : contournement par ROTATION PURE (pas de marche arriere
+            # sauf danger immediat), sens verrouille -> trajectoire propre.
+            self.state = "REROUTE"
+            t.angular.z = w * self.avoid_dir
+            if d_front < safety:                # danger : on degage en tournant
+                t.linear.x = -0.05
+            if d_wide > obst * 1.15:            # cone large degage -> on repart
+                self.pause_since = None
+                self.avoid_dir = 0.0
+                self.next_wander = now          # tire un nouveau cap tout de suite
+                self.state = "FORWARD"
+            self.cmd_pub.publish(t)
+            return
         else:
             # voie libre : on annule pause et verrou de contournement
             self.pause_since = None
@@ -228,7 +212,7 @@ class WanderNode(Node):
             self.next_wander = now + rclpy.duration.Duration(
                 seconds=random.uniform(self.get_parameter("wander_min_s").value,
                                        self.get_parameter("wander_max_s").value))
-        t.linear.x = v * (0.6 if d_wide < obst * 1.5 else 1.0)
+        t.linear.x = v * (0.8 if d_wide < obst else 1.0)   # plein regime sauf pres
         t.angular.z = self.wander_w
         self.cmd_pub.publish(t)
 

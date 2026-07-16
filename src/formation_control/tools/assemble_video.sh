@@ -2,29 +2,59 @@
 # assemble_video.sh — build a viewable video from a JPEG-sequence segment folder.
 #
 # The recorder stores native JPEG frames (no re-encode) at up to 55-60 fps.
-# This rebuilds an mp4 at a chosen fps for viewing. The per-frame timestamps in
-# frames.csv remain the ground truth for training (real timing).
+# This rebuilds an mp4 using the REAL per-frame timestamps from frames.csv, so
+# the video timing matches reality (no artificial time jumps). Falls back to a
+# fixed frame rate if frames.csv is missing.
 #
-#   ./assemble_video.sh <segment_folder> [fps] [out.mp4]
-#   ./assemble_video.sh ./dataset_collected/tortuga2/tortuga2_..._seg01 55
+#   ./assemble_video.sh <segment_folder> [fallback_fps] [out.mp4]
 #
-# To assemble a whole session at once:
-#   for d in ./dataset_collected/tortuga2/*_seg*/; do ./assemble_video.sh "$d" 55; done
+# Whole session:
+#   for d in ./dataset_collected/tortuga2/*_seg*/; do ./assemble_video.sh "$d"; done
 
 DIR=${1%/}
-FPS=${2:-55}
+FPS=${2:-58}
 OUT=${3:-${DIR}.mp4}
 
 if [ -z "$DIR" ] || [ ! -d "$DIR" ]; then
-  echo "Usage: $0 <segment_folder> [fps] [out.mp4]"
+  echo "Usage: $0 <segment_folder> [fallback_fps] [out.mp4]"
   exit 1
 fi
 if ! ls "$DIR"/frame_*.jpg >/dev/null 2>&1; then
-  echo "No frame_*.jpg found in $DIR"
+  echo "No frame_*.jpg in $DIR — skipping."
   exit 1
 fi
 
-echo "Assembling $DIR -> $OUT at ${FPS} fps…"
-ffmpeg -y -framerate "$FPS" -pattern_type glob -i "$DIR/frame_*.jpg" \
-  -c:v libx264 -pix_fmt yuv420p "$OUT"
+ABS=$(cd "$DIR" && pwd)
+CSV="$DIR/frames.csv"
+
+if [ -f "$CSV" ]; then
+  # Build an ffmpeg concat list: each frame lasts until the next one, using the
+  # REAL ROS timestamps. Capture gaps are REPRESENTED (the frame is held during
+  # the gap) instead of being skipped, so the video duration == the real elapsed
+  # time -> it stays in sync with the lidar/odom bag (same ROS clock). Only
+  # zero/negative deltas fall back to 1/FPS; a huge cap (1h) just guards against
+  # a pathological stamp.
+  LIST=$(mktemp)
+  awk -F, -v DIR="$ABS" -v FPS="$FPS" '
+    NR>1 { n++; fn[n]=$2; ts[n]=$3 + $4/1e9 }
+    END {
+      for (k=1;k<n;k++){
+        d = ts[k+1]-ts[k]
+        if (d<=0) d = 1.0/FPS
+        if (d>3600) d = 3600
+        printf "file %s/%s\nduration %.6f\n", DIR, fn[k], d
+      }
+      if (n>0){
+        printf "file %s/%s\nduration %.6f\n", DIR, fn[n], 1.0/FPS
+        printf "file %s/%s\n", DIR, fn[n]
+      }
+    }' "$CSV" > "$LIST"
+  echo "Assembling $DIR -> $OUT (real timing from frames.csv)…"
+  ffmpeg -y -f concat -safe 0 -i "$LIST" -vsync vfr -pix_fmt yuv420p "$OUT"
+  rm -f "$LIST"
+else
+  echo "Assembling $DIR -> $OUT (fixed ${FPS} fps, no csv)…"
+  ffmpeg -y -framerate "$FPS" -pattern_type glob -i "$DIR/frame_*.jpg" \
+    -c:v libx264 -pix_fmt yuv420p "$OUT"
+fi
 echo "Wrote $OUT"

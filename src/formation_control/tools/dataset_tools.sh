@@ -21,6 +21,18 @@ IDX=("$@"); [ ${#IDX[@]} -eq 0 ] && IDX=("${ALL[@]}")
 run_ssh() { sshpass -p $PW ssh -o StrictHostKeyChecking=no \
             -o ConnectTimeout=4 tortuga$1@192.168.0.20$1 "$2"; }
 
+# Auto-assemble a segment folder into <folder>.mp4 (skips if already done or if
+# ffmpeg/assemble_video.sh is missing). Timing comes from frames.csv.
+ASM="$(dirname "$0")/assemble_video.sh"
+ASM_FPS=${ASM_FPS:-58}
+assemble_dir() {
+  local d="${1%/}"
+  [ -d "$d" ] || return 0
+  [ -f "$d.mp4" ] && return 0
+  command -v ffmpeg >/dev/null 2>&1 || { echo "  (ffmpeg absent -> pas de video)"; return 0; }
+  bash "$ASM" "$d" "$ASM_FPS" "$d.mp4" >/dev/null 2>&1 && echo "  video: $d.mp4"
+}
+
 case $CMD in
   start)
     for i in "${IDX[@]}"; do
@@ -54,8 +66,12 @@ case $CMD in
       sshpass -p $PW rsync -avz --progress \
         -e "ssh -o StrictHostKeyChecking=no" \
         tortuga$i@192.168.0.20$i:~/dataset/ ./dataset_collected/tortuga$i/
+      # auto-assemble each pulled segment into a ready-to-watch mp4
+      for d in ./dataset_collected/tortuga$i/*_seg*/; do
+        assemble_dir "$d"
+      done
     done
-    echo "Videos dans ./dataset_collected/"
+    echo "Videos (mp4) dans ./dataset_collected/"
     ;;
   drain)
     # Vide le disque des robots EN CONTINU pendant l'enregistrement.
@@ -86,6 +102,7 @@ case $CMD in
                ./dataset_collected/tortuga$i/ ; then
             run_ssh $i "rm -rf ~/dataset/'$d'"  # purge SEULEMENT si rsync OK
             echo "  ok + purge : $d"
+            assemble_dir "./dataset_collected/tortuga$i/$d"   # -> mp4 auto
           else
             echo "  echec transfert (conserve sur le robot) : $d"
           fi
