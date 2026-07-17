@@ -39,8 +39,11 @@ class WanderNode(Node):
         #   Le robot est un cube 16x16 cm (demi-diagonale ~0.11 m). En rotation,
         #   ses COINS balaient un cercle : on exige donc que tout un cone large
         #   soit degage avant de repartir, sinon le coin accroche l'obstacle.
-        self.declare_parameter("robot_radius", 0.18)    # demi-diagonale + marge
-        #   pour DEUX corps (le mien + celui du robot croise) pendant un virage.
+        self.declare_parameter("robot_radius", 0.13)    # BULLE = cercle CIRCONSCRIT
+        #   du carre 16x16 cm : rayon = demi-diagonale ~0.113 m (+ petite marge).
+        #   C'est ce rayon qui couvre les COINS ; un cercle de 8 cm raterait les
+        #   coins et laisserait les carrosseries se toucher. Sert de plancher
+        #   d'evitement OMNIDIRECTIONNEL (cone avant large + secteurs lateraux).
         # --- Errance continue (meandre) : au lieu d'un seul a-coup toutes les
         # 5 s, on applique une vitesse de rotation aleatoire QUI DURE et se
         # renouvelle souvent -> trajectoire sinueuse, exploration reguliere.
@@ -162,34 +165,42 @@ class WanderNode(Node):
         safety = self.get_parameter("safety_dist").value
         pause_t = self.get_parameter("pause_time").value
 
-        # --- EVITEMENT en 2 temps, FLUIDE (pas de va-et-vient) ---
-        # 1) obstacle devant -> ARRET NET 1 s : "attends, est-ce que ca bouge ?"
-        #    (immobile ; on ne recule QUE si vraiment colle < safety).
-        # 2) toujours la apres 1 s -> on TOURNE sur place (sens verrouille vers
-        #    le cote le plus degage) jusqu'a ce que le cone large soit libre,
-        #    puis on repart avec un NOUVEAU cap. Rotation pure = zero begaiement.
-        blocked = d_front < obst
+        # --- EVITEMENT body-aware (BULLE) en 2 temps ---
+        # Le robot est un CARRE 16x16 cm : sa bulle est le cercle CIRCONSCRIT
+        # (rayon = robot_radius ~0.113 m). On surveille TOUT l'avant (cone large
+        # ±avoid_deg) ET les secteurs lateraux, pas seulement l'etroit cone frontal
+        # ±front_deg : un robot arrivant DE BIAIS etait invisible a d_front et se
+        # faisait accrocher au coin (d'ou "il tourne, ravance et se recogne").
+        #   breach = un obstacle entre dans la bulle (rayon + petite marge) dans
+        #            N'IMPORTE quelle direction avant/laterale -> danger immediat.
+        # 1) obstacle -> ARRET NET 1 s. 2) toujours la -> ROTATION PURE jusqu'a ce
+        #    que la bulle soit reellement degagee, puis nouveau cap.
+        breach = min(d_front, d_wide, d_left, d_right) < radius + 0.05
+        blocked = (d_wide < obst) or breach
         if blocked:
             if self.pause_since is None:
                 self.pause_since = now
                 self.avoid_dir = 1.0 if d_left > d_right else -1.0  # choisi 1 fois
             waited = (now - self.pause_since).nanoseconds / 1e9
+            too_close = (d_wide < safety) or breach     # bulle percee -> reculer
 
             if waited < pause_t:
                 # temps 1 : arret complet, on observe (espoir que ca degage)
                 self.state = "PAUSE"
-                if d_front < safety:            # colle : petit recul de securite
+                if too_close:
                     t.linear.x = -0.06
                 self.cmd_pub.publish(t)
                 return
 
-            # temps 2 : contournement par ROTATION PURE (pas de marche arriere
-            # sauf danger immediat), sens verrouille -> trajectoire propre.
+            # temps 2 : contournement par ROTATION PURE (marche arriere seulement
+            # si la bulle est percee), sens verrouille -> trajectoire propre.
             self.state = "REROUTE"
             t.angular.z = w * self.avoid_dir
-            if d_front < safety:                # danger : on degage en tournant
+            if too_close:                       # danger : on degage en reculant
                 t.linear.x = -0.05
-            if d_wide > obst * 1.15:            # cone large degage -> on repart
+            # on ne repart que quand le cone large ET la bulle sont degages (evite
+            # de repartir alors que l'autre robot est encore sur le flanc-avant).
+            if d_wide > obst * 1.25 and not breach:
                 self.pause_since = None
                 self.avoid_dir = 0.0
                 self.next_wander = now          # tire un nouveau cap tout de suite

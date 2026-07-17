@@ -3,9 +3,16 @@
 #
 #   ./dataset_tools.sh start 1 2 3 4   -> lance errance+enregistrement
 #   ./dataset_tools.sh stop            -> arret PROPRE (recorder d'abord)
-#   ./dataset_tools.sh collect         -> rapatrie les videos sur le PC
+#   ./dataset_tools.sh collect         -> rapatrie les videos + segments colles
+#                                         (_final.mp4) + rosbags convertis en CSV
 #   ./dataset_tools.sh drain 2 3       -> pull + purge EN CONTINU des segments
 #                                         termines (disque des Pi toujours bas)
+#   ./dataset_tools.sh concat 1 2      -> (re)colle les segments d'une session en
+#                                         <robot>_<session>_final.mp4
+#   ./dataset_tools.sh bag2csv 1 2     -> convertit les rosbags .db3 deja rapatries
+#                                         en CSV (a cote des videos)
+#   ./dataset_tools.sh tidy 1 2        -> range un dossier deja rapatrie en
+#                                         sous-dossiers par session tortugaX_<session>/
 #   ./dataset_tools.sh space           -> espace disque restant par robot
 
 PW=1234
@@ -24,6 +31,9 @@ run_ssh() { sshpass -p $PW ssh -o StrictHostKeyChecking=no \
 # Auto-assemble a segment folder into <folder>.mp4 (skips if already done or if
 # ffmpeg/assemble_video.sh is missing). Timing comes from frames.csv.
 ASM="$(dirname "$0")/assemble_video.sh"
+CONCAT="$(dirname "$0")/concat_segments.sh"
+BAG2CSV="$(dirname "$0")/bag_to_csv.py"
+TIDY="$(dirname "$0")/tidy_dataset.py"
 ASM_FPS=${ASM_FPS:-58}
 assemble_dir() {
   local d="${1%/}"
@@ -31,6 +41,40 @@ assemble_dir() {
   [ -f "$d.mp4" ] && return 0
   command -v ffmpeg >/dev/null 2>&1 || { echo "  (ffmpeg absent -> pas de video)"; return 0; }
   bash "$ASM" "$d" "$ASM_FPS" "$d.mp4" >/dev/null 2>&1 && echo "  video: $d.mp4"
+}
+
+# Colle les segments mp4 de CHAQUE session d'un dossier robot en un seul
+# <robot>_<session>_final.mp4 (ordre seg01..segNN).
+finalize_videos() {
+  local d="${1%/}"
+  [ -d "$d" ] || return 0
+  ls "$d"/*_seg*.mp4 >/dev/null 2>&1 || return 0
+  command -v ffmpeg >/dev/null 2>&1 || { echo "  (ffmpeg absent -> pas de _final.mp4)"; return 0; }
+  echo "  concat -> videos finales :"
+  bash "$CONCAT" "$d"
+}
+
+# Convertit chaque rosbag (.db3 isole OU dossier bag_*/) d'un dossier robot en
+# CSV, POSES A COTE des videos (meme dossier). Un CSV par topic (scan/odom/imu).
+convert_bags() {
+  local d="${1%/}"
+  [ -d "$d" ] || return 0
+  command -v python3 >/dev/null 2>&1 || { echo "  (python3 absent -> pas de conversion db3)"; return 0; }
+  local b
+  for b in "$d"/bag_*/ "$d"/*.db3; do
+    [ -e "$b" ] || continue
+    python3 "$BAG2CSV" "$b" "$d"
+  done
+}
+
+# Range un dossier robot "a plat" en sous-dossiers PAR SESSION
+# (tortugaX_<session>/ contenant sa video _final.mp4, ses segments et les CSV
+# du rosbag). Rattache chaque rosbag a la session video la plus proche.
+tidy_dataset() {
+  local d="${1%/}"
+  [ -d "$d" ] || return 0
+  command -v python3 >/dev/null 2>&1 || { echo "  (python3 absent -> pas de rangement)"; return 0; }
+  python3 "$TIDY" "$d"
 }
 
 case $CMD in
@@ -70,8 +114,13 @@ case $CMD in
       for d in ./dataset_collected/tortuga$i/*_seg*/; do
         assemble_dir "$d"
       done
+      # colle les segments d'une meme session en <robot>_<session>_final.mp4
+      finalize_videos "./dataset_collected/tortuga$i"
+      # range tout par session : tortugaX_<session>/ (video + *_total.csv + raw/)
+      tidy_dataset "./dataset_collected/tortuga$i"
     done
-    echo "Videos (mp4) dans ./dataset_collected/"
+    echo "Range par session dans ./dataset_collected/tortugaX/tortugaX_<session>/"
+    echo "  (video _final.mp4 + frames/odom/scan_total.csv ; brut dans raw/)"
     ;;
   drain)
     # Vide le disque des robots EN CONTINU pendant l'enregistrement.
@@ -111,6 +160,27 @@ case $CMD in
       sleep "$INTERVAL"
     done
     ;;
+  concat)
+    # (re)colle les segments deja rapatries en <robot>_<session>_final.mp4
+    for i in "${IDX[@]}"; do
+      echo "=== tortuga$i ==="
+      finalize_videos "./dataset_collected/tortuga$i"
+    done
+    ;;
+  bag2csv)
+    # convertit les rosbags .db3 deja rapatries en CSV (a cote des videos)
+    for i in "${IDX[@]}"; do
+      echo "=== tortuga$i ==="
+      convert_bags "./dataset_collected/tortuga$i"
+    done
+    ;;
+  tidy)
+    # range un dossier deja rapatrie en sous-dossiers par session
+    for i in "${IDX[@]}"; do
+      echo "=== tortuga$i ==="
+      tidy_dataset "./dataset_collected/tortuga$i"
+    done
+    ;;
   space)
     for i in "${IDX[@]}"; do
       echo -n "tortuga$i : "
@@ -119,6 +189,6 @@ case $CMD in
     done
     ;;
   *)
-    echo "Usage: $0 {start|stop|collect|drain|space} [index robots...]"
+    echo "Usage: $0 {start|stop|collect|drain|concat|bag2csv|tidy|space} [index robots...]"
     ;;
 esac

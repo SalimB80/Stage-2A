@@ -1,5 +1,5 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess
+from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch.conditions import IfCondition
 from launch_ros.actions import Node
@@ -49,16 +49,11 @@ def generate_launch_description():
                           'desired_bearing': desired_bearing,
                           'target_distance': target_distance}]),
 
-        # Dataset -> recorder + rosbag
+        # Dataset -> recorder SEUL (pas de rosbag). Le recorder ecrit deja les
+        # frames JPEG + frames.csv / odom.csv / scan.csv (horodates, alignes a la
+        # video). Le rosbag .db3 faisait doublon (scan/odom deja couverts, seul
+        # l'IMU etait en plus) et n'est pas voulu -> supprime.
         Node(package='formation_control', executable='recorder', name='recorder',
              namespace=ns, condition=IfCondition(is_dataset),
              parameters=[{'robot_name': ns, 'segment_minutes': 5.0}]),
-
-        ExecuteProcess(
-            condition=IfCondition(is_dataset),
-            cmd=['bash', '-c',
-                 ['mkdir -p ~/dataset && exec ros2 bag record '
-                  '-o ~/dataset/bag_$(date +%Y%m%d_%H%M%S)_', ns,
-                  ' /', ns, '/scan /', ns, '/odom /', ns, '/imu']],
-            output='screen'),
     ])
