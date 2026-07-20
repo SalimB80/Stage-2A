@@ -34,6 +34,7 @@ ASM="$(dirname "$0")/assemble_video.sh"
 CONCAT="$(dirname "$0")/concat_segments.sh"
 BAG2CSV="$(dirname "$0")/bag_to_csv.py"
 TIDY="$(dirname "$0")/tidy_dataset.py"
+REBUILD="$(dirname "$0")/rebuild_videos.sh"
 ASM_FPS=${ASM_FPS:-58}
 assemble_dir() {
   local d="${1%/}"
@@ -77,6 +78,16 @@ tidy_dataset() {
   python3 "$TIDY" "$d"
 }
 
+# Filet de securite : apres rangement, reconstruit toute video _final.mp4
+# manquante A PARTIR de raw/ (assemble les segments + concatene). Saute celles
+# deja OK, signale les sessions sans frames.
+rebuild_videos() {
+  local d="${1%/}"
+  [ -d "$d" ] || return 0
+  command -v ffmpeg >/dev/null 2>&1 || return 0
+  bash "$REBUILD" "$d" "$ASM_FPS"
+}
+
 case $CMD in
   start)
     for i in "${IDX[@]}"; do
@@ -118,6 +129,8 @@ case $CMD in
       finalize_videos "./dataset_collected/tortuga$i"
       # range tout par session : tortugaX_<session>/ (video + *_total.csv + raw/)
       tidy_dataset "./dataset_collected/tortuga$i"
+      # filet de securite : reconstruit toute video manquante depuis raw/
+      rebuild_videos "./dataset_collected/tortuga$i"
     done
     echo "Range par session dans ./dataset_collected/tortugaX/tortugaX_<session>/"
     echo "  (video _final.mp4 + frames/odom/scan_total.csv ; brut dans raw/)"
@@ -174,6 +187,13 @@ case $CMD in
       convert_bags "./dataset_collected/tortuga$i"
     done
     ;;
+  rebuildvid)
+    # reconstruit les videos _final.mp4 manquantes depuis raw/ (deja range)
+    for i in "${IDX[@]}"; do
+      echo "=== tortuga$i ==="
+      rebuild_videos "./dataset_collected/tortuga$i"
+    done
+    ;;
   tidy)
     # range un dossier deja rapatrie en sous-dossiers par session
     for i in "${IDX[@]}"; do
@@ -189,6 +209,6 @@ case $CMD in
     done
     ;;
   *)
-    echo "Usage: $0 {start|stop|collect|drain|concat|bag2csv|tidy|space} [index robots...]"
+    echo "Usage: $0 {start|stop|collect|drain|concat|bag2csv|tidy|rebuildvid|space} [index robots...]"
     ;;
 esac

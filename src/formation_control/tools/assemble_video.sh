@@ -19,7 +19,11 @@ if [ -z "$DIR" ] || [ ! -d "$DIR" ]; then
   echo "Usage: $0 <segment_folder> [fallback_fps] [out.mp4]"
   exit 1
 fi
-if ! ls "$DIR"/frame_*.jpg >/dev/null 2>&1; then
+# Detection insensible au NOMBRE de fichiers : un glob 'ls frame_*.jpg' explose
+# en "Argument list too long" sur les gros segments (dizaines de milliers
+# d'images) et faisait croire a tort qu'il n'y avait pas de frames. 'find
+# -print -quit' s'arrete a la 1re image -> rapide et sans limite d'arguments.
+if [ -z "$(find "$DIR" -maxdepth 1 -name 'frame_*.jpg' -print -quit 2>/dev/null)" ]; then
   echo "No frame_*.jpg in $DIR — skipping."
   exit 1
 fi
@@ -50,7 +54,11 @@ if [ -f "$CSV" ]; then
       }
     }' "$CSV" > "$LIST"
   echo "Assembling $DIR -> $OUT (real timing from frames.csv)…"
-  ffmpeg -y -f concat -safe 0 -i "$LIST" -vsync vfr -pix_fmt yuv420p "$OUT"
+  # -vsync passthrough : garde EXACTEMENT les timestamps du CSV (aucune image
+  # jetee/dupliquee, pas de retombee sur 25 fps par defaut). timescale fin pour
+  # que les PTS irreguliers (55-60 fps reels) ne soient pas arrondis.
+  ffmpeg -y -f concat -safe 0 -i "$LIST" -vsync passthrough \
+    -video_track_timescale 90000 -pix_fmt yuv420p "$OUT"
   rm -f "$LIST"
 else
   echo "Assembling $DIR -> $OUT (fixed ${FPS} fps, no csv)…"
