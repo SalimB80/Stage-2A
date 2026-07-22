@@ -503,11 +503,23 @@ def behavior_start():
                              f"-p hsv_high:=[{hi[0]},{hi[1]},{hi[2]}]")
                 else:
                     cspec = f"-p target_color:={color}"
+                # Lancement DETACHE (nohup + &) avec log sur le robot, comme
+                # dataset_tools.sh. Sinon le ros2 run tourne en foreground de
+                # la session SSH : si la connexion se ferme/hoquete (WiFi), le
+                # tracker recoit SIGHUP et MEURT -> robot fige, sans trace.
+                # Le log ~/tracker_tortugaX.log permet de diagnostiquer.
+                tracker_cmd = (
+                    f"ros2 run formation_control tracker "
+                    f"--ros-args -r __ns:=/tortuga{rob} "
+                    # float() OBLIGATOIRE : les bearings sont des int (0, 30…)
+                    # mais le param est declare en DOUBLE cote tracker -> ROS2
+                    # rejette un int et le nœud CRASHE au demarrage. On envoie
+                    # donc '0.0' et non '0'. Idem target_distance (deja float).
+                    f"{cspec} -p desired_bearing:={float(bear)} "
+                    f"-p target_distance:={float(FOLLOW_DIST.get(rob, TARGET_DISTANCE))}")
                 ssh_bg(rob, robot_env() +
-                       f"ros2 run formation_control tracker "
-                       f"--ros-args -r __ns:=/tortuga{rob} "
-                       f"{cspec} -p desired_bearing:={bear} "
-                       f"-p target_distance:={FOLLOW_DIST.get(rob, TARGET_DISTANCE)}")
+                       f"nohup {tracker_cmd} "
+                       f"> ~/tracker_tortuga{rob}.log 2>&1 &")
             root.after(0, lambda: log(f"Cascade started ({form}).", "ok"))
         else:
             for i in present:
