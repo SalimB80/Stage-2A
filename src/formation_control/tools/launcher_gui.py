@@ -51,6 +51,10 @@ FORMATION_BEARINGS = {
 }
 TARGET_DISTANCE = 0.6
 SAFETY = 0.16
+# Delai (s) entre le lancement de deux robots : evite la course au demarrage
+# (decouverte DDS + connexions ssh simultanees) qui empechait certains noeuds
+# de demarrer quand tout partait au meme instant. Reglable via env LAUNCH_STAGGER.
+LAUNCH_STAGGER = float(os.environ.get("LAUNCH_STAGGER", "2.0"))
 PW = "1234"
 ROS_DOMAIN_ID = 30
 DATASET_SH = "./src/formation_control/tools/dataset_tools.sh"
@@ -490,19 +494,39 @@ def behavior_start():
                 # Single-range color -> push the tuned HSV as a custom filter
                 # (so the HSV Tuner values actually apply). Multi-range (red)
                 # -> use the named preset in tracker_node.
+                #
+                # IMPORTANT : les crochets DOIVENT etre proteges par des
+                # simple-quotes. Sinon le shell du robot (via ssh) traite
+                # '[20,80,80]' comme un glob : avec nullglob l'argument DISPARAIT
+                # -> 'ros2 run ... -p' sans valeur -> le tracker crashe au
+                # demarrage, sans rien afficher (ssh_bg envoie tout dans DEVNULL).
                 ranges = COLORS_HSV.get(color, [])
                 if len(ranges) == 1:
                     lo, hi = ranges[0]
                     cspec = (f"-p target_color:=custom "
-                             f"-p hsv_low:=[{lo[0]},{lo[1]},{lo[2]}] "
-                             f"-p hsv_high:=[{hi[0]},{hi[1]},{hi[2]}]")
+                             f"-p hsv_low:='[{lo[0]},{lo[1]},{lo[2]}]' "
+                             f"-p hsv_high:='[{hi[0]},{hi[1]},{hi[2]}]'")
                 else:
-                    cspec = f"-p target_color:={color}"
+                    # Multi-plage (rouge) : preset NOMME du tracker, dont les
+                    # cles sont en FRANCAIS ('jaune'/'cyan'/'rouge'). HELMETS est
+                    # en anglais -> on traduit, sinon le tracker retombe sur
+                    # 'jaune' (COLORS.get(col, COLORS["jaune"])).
+                    fr = {"red": "rouge", "yellow": "jaune", "cyan": "cyan"}
+                    cspec = f"-p target_color:={fr.get(color, color)}"
+                # desired_bearing et target_distance sont declares en DOUBLE
+                # dans le tracker : il FAUT les envoyer en float ('0.0', pas '0'),
+                # sinon ros2 lit un INTEGER -> InvalidParameterTypeException ->
+                # le tracker crashe au demarrage (invisible via ssh_bg -> DEVNULL).
                 ssh_bg(rob, robot_env() +
                        f"ros2 run formation_control tracker "
                        f"--ros-args -r __ns:=/tortuga{rob} "
-                       f"{cspec} -p desired_bearing:={bear} "
-                       f"-p target_distance:={TARGET_DISTANCE}")
+                       f"{cspec} -p desired_bearing:={float(bear)} "
+                       f"-p target_distance:={float(TARGET_DISTANCE)}")
+                # DECALAGE entre followers : lancer tous les trackers au meme
+                # instant crée une course (découverte DDS + connexions ssh
+                # simultanées) et certains ne démarrent pas. On laisse chaque
+                # tracker s'enregistrer avant de lancer le suivant.
+                time.sleep(LAUNCH_STAGGER)
             root.after(0, lambda: log(f"Cascade started ({form}).", "ok"))
         else:
             for i in present:
@@ -517,6 +541,8 @@ def behavior_start():
                            f"--ros-args -r __ns:=/tortuga{i} "
                            f"-p robot_name:=tortuga{i} "
                            f"-p segment_minutes:={seg_minutes}")
+                # meme decalage anti-course qu'en cascade (voir LAUNCH_STAGGER)
+                time.sleep(LAUNCH_STAGGER)
             msg = ("Dataset started (recording!): " if m == "dataset"
                    else "Wander started: ") + ", ".join(f"t{i}" for i in present)
             root.after(0, lambda msg=msg: log(msg, "ok"))

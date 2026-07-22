@@ -31,6 +31,7 @@ from cv_bridge import CvBridge
 import cv2
 import numpy as np
 from rclpy.qos import qos_profile_sensor_data
+from rcl_interfaces.msg import ParameterDescriptor
 
 # ---------------------------------------------------------------------------
 # PRESETS COULEURS (HSV OpenCV : H 0-179, S 0-255, V 0-255)
@@ -52,8 +53,12 @@ class TrackerNode(Node):
         self.declare_parameter("target_color", "jaune")
         self.declare_parameter("hsv_low",  [0, 0, 0])      # si target_color=custom
         self.declare_parameter("hsv_high", [0, 0, 0])
-        self.declare_parameter("target_distance", 0.6)
-        self.declare_parameter("desired_bearing", 0.0)      # degres
+        # dynamic_typing : accepte un override INT ou DOUBLE. Sans ca, passer
+        # '-p desired_bearing:=0' (entier) sur un parametre declare en DOUBLE
+        # leve InvalidParameterTypeException et le noeud crashe au demarrage.
+        _num = ParameterDescriptor(dynamic_typing=True)
+        self.declare_parameter("target_distance", 0.6, _num)
+        self.declare_parameter("desired_bearing", 0.0, _num)  # degres
         self.declare_parameter("min_area", 800)
         self.declare_parameter("area_near", 12000)
         # area_near : surface (px^2) du casque au-dela de laquelle on est
@@ -81,10 +86,12 @@ class TrackerNode(Node):
         # cible (un casque a 30 cm serait enorme) -> obstacle, on evite.
         self.declare_parameter("stuck_time", 1.0)
         self.declare_parameter("escape_time", 1.3)
-        self.declare_parameter("search_spin_only", True)
-        # search_spin_only=True : en recherche on TOURNE SANS AVANCER.
-        # Plus sur en cascade : un robot qui a perdu sa cible ne s'eloigne
-        # pas de la colonne, il balaie sur place.
+        self.declare_parameter("search_spin_only", False)
+        # search_spin_only=False (defaut) : en recherche le robot ERRE (avance
+        # en serpentant + evitement d'obstacle) pour ALLER trouver la couleur —
+        # c'est le "wander -> cherche la couleur -> suit" attendu en cascade.
+        # Mettre True pour l'ancien comportement (balaye SUR PLACE, sans
+        # s'eloigner, utile si tu veux garder les robots groupes).
 
         self.bridge = CvBridge()
         self.img_w = 640
@@ -185,6 +192,11 @@ class TrackerNode(Node):
     # 359 deg et 1 deg sont voisins.
     def lidar_cb(self, msg):
         self.scan_count += 1
+        # Garde-fou : le lidar (LDS) publie parfois un scan VIDE ou sans pas
+        # angulaire (angle_increment=0) -> division par zero dans idx_of, qui
+        # faisait CRASHER le noeud (le robot s'arretait apres avoir bouge 1 s).
+        if len(msg.ranges) == 0 or msg.angle_increment == 0.0:
+            return
         ranges = np.array(msg.ranges)
         ranges[np.isinf(ranges) | np.isnan(ranges)] = 99.0
         n = len(ranges)
@@ -302,7 +314,9 @@ class TrackerNode(Node):
             self.cmd_pub.publish(self._coast())
         else:
             self.state = "SEARCH"
-            self.cmd_pub.publish(self._search())
+            cmd = self._search()
+            self.cmd_forward = cmd.linear.x > 0.04   # anti-blocage pendant l'errance
+            self.cmd_pub.publish(cmd)
 
     def debug_log(self):
         # Diagnostic capteurs : cam/scan/odom = nb de messages recus depuis
@@ -353,14 +367,20 @@ class TrackerNode(Node):
         return t
 
     def _search(self):
+        # Recherche de la couleur. En errance (defaut) : le robot AVANCE en
+        # serpentant pour explorer ; l'evitement d'obstacle reste prioritaire
+        # (etat AVOID dans control_loop). En spin_only : balaye SUR PLACE.
         t = Twist()
         now = self.get_clock().now()
-        if (now - self.search_switch).nanoseconds/1e9 > 4.0:
+        if (now - self.search_switch).nanoseconds/1e9 > random.uniform(2.5, 4.5):
             self.search_dir = random.choice([-1.0, 1.0])
             self.search_switch = now
-        t.angular.z = self.get_parameter("w_search").value * self.search_dir
-        if not self.get_parameter("search_spin_only").value:
-            t.linear.x = self.get_parameter("v_search").value * 0.5
+        if self.get_parameter("search_spin_only").value:
+            t.angular.z = self.get_parameter("w_search").value * self.search_dir
+        else:
+            t.linear.x = self.get_parameter("v_search").value        # avance
+            t.angular.z = self.get_parameter("w_search").value \
+                * self.search_dir * 0.5                              # meandre doux
         return t
 
     def _clamp(self, v, lim):

@@ -39,7 +39,7 @@ class WanderNode(Node):
         #   Le robot est un cube 16x16 cm (demi-diagonale ~0.11 m). En rotation,
         #   ses COINS balaient un cercle : on exige donc que tout un cone large
         #   soit degage avant de repartir, sinon le coin accroche l'obstacle.
-        self.declare_parameter("robot_radius", 0.13)    # BULLE = cercle CIRCONSCRIT
+        self.declare_parameter("robot_radius", 0.12)    # BULLE = cercle CIRCONSCRIT
         #   du carre 16x16 cm : rayon = demi-diagonale ~0.113 m (+ petite marge).
         #   C'est ce rayon qui couvre les COINS ; un cercle de 8 cm raterait les
         #   coins et laisserait les carrosseries se toucher. Sert de plancher
@@ -102,6 +102,10 @@ class WanderNode(Node):
 
     def sector_min(self, msg, center_rad, half_rad):
         # Gere les lidars en [0, 2pi] : angle normalise + fenetre circulaire.
+        # Garde-fou : scan vide ou sans pas angulaire (angle_increment=0) ->
+        # division par zero -> on renvoie "rien vu" plutot que de crasher.
+        if len(msg.ranges) == 0 or msg.angle_increment == 0.0:
+            return 99.0
         ranges = np.array(msg.ranges)
         ranges[np.isinf(ranges) | np.isnan(ranges)] = 99.0
         n = len(ranges)
