@@ -49,12 +49,13 @@ FORMATION_BEARINGS = {
     "column": [0, 0, 0], "line": [30, -30, 30],
     "triangle": [25, -25, 0], "square": [20, -20, 0],
 }
-TARGET_DISTANCE = 0.6
+TARGET_DISTANCE = 0.32          # defaut cascade colonne : 32 cm
+# Distance de suivi PAR ROBOT (m). Chaque suiveur peut avoir sa propre
+# distance ; a defaut on retombe sur TARGET_DISTANCE (0.32). Reglable aussi
+# a chaud sans relancer :
+#   ros2 param set /tortugaX/tracker target_distance 0.40
+FOLLOW_DIST = {1: 0.32, 2: 0.32, 3: 0.32, 4: 0.32}
 SAFETY = 0.16
-# Delai (s) entre le lancement de deux robots : evite la course au demarrage
-# (decouverte DDS + connexions ssh simultanees) qui empechait certains noeuds
-# de demarrer quand tout partait au meme instant. Reglable via env LAUNCH_STAGGER.
-LAUNCH_STAGGER = float(os.environ.get("LAUNCH_STAGGER", "2.0"))
 PW = "1234"
 ROS_DOMAIN_ID = 30
 DATASET_SH = "./src/formation_control/tools/dataset_tools.sh"
@@ -494,39 +495,19 @@ def behavior_start():
                 # Single-range color -> push the tuned HSV as a custom filter
                 # (so the HSV Tuner values actually apply). Multi-range (red)
                 # -> use the named preset in tracker_node.
-                #
-                # IMPORTANT : les crochets DOIVENT etre proteges par des
-                # simple-quotes. Sinon le shell du robot (via ssh) traite
-                # '[20,80,80]' comme un glob : avec nullglob l'argument DISPARAIT
-                # -> 'ros2 run ... -p' sans valeur -> le tracker crashe au
-                # demarrage, sans rien afficher (ssh_bg envoie tout dans DEVNULL).
                 ranges = COLORS_HSV.get(color, [])
                 if len(ranges) == 1:
                     lo, hi = ranges[0]
                     cspec = (f"-p target_color:=custom "
-                             f"-p hsv_low:='[{lo[0]},{lo[1]},{lo[2]}]' "
-                             f"-p hsv_high:='[{hi[0]},{hi[1]},{hi[2]}]'")
+                             f"-p hsv_low:=[{lo[0]},{lo[1]},{lo[2]}] "
+                             f"-p hsv_high:=[{hi[0]},{hi[1]},{hi[2]}]")
                 else:
-                    # Multi-plage (rouge) : preset NOMME du tracker, dont les
-                    # cles sont en FRANCAIS ('jaune'/'cyan'/'rouge'). HELMETS est
-                    # en anglais -> on traduit, sinon le tracker retombe sur
-                    # 'jaune' (COLORS.get(col, COLORS["jaune"])).
-                    fr = {"red": "rouge", "yellow": "jaune", "cyan": "cyan"}
-                    cspec = f"-p target_color:={fr.get(color, color)}"
-                # desired_bearing et target_distance sont declares en DOUBLE
-                # dans le tracker : il FAUT les envoyer en float ('0.0', pas '0'),
-                # sinon ros2 lit un INTEGER -> InvalidParameterTypeException ->
-                # le tracker crashe au demarrage (invisible via ssh_bg -> DEVNULL).
+                    cspec = f"-p target_color:={color}"
                 ssh_bg(rob, robot_env() +
                        f"ros2 run formation_control tracker "
                        f"--ros-args -r __ns:=/tortuga{rob} "
-                       f"{cspec} -p desired_bearing:={float(bear)} "
-                       f"-p target_distance:={float(TARGET_DISTANCE)}")
-                # DECALAGE entre followers : lancer tous les trackers au meme
-                # instant crée une course (découverte DDS + connexions ssh
-                # simultanées) et certains ne démarrent pas. On laisse chaque
-                # tracker s'enregistrer avant de lancer le suivant.
-                time.sleep(LAUNCH_STAGGER)
+                       f"{cspec} -p desired_bearing:={bear} "
+                       f"-p target_distance:={FOLLOW_DIST.get(rob, TARGET_DISTANCE)}")
             root.after(0, lambda: log(f"Cascade started ({form}).", "ok"))
         else:
             for i in present:
@@ -541,45 +522,34 @@ def behavior_start():
                            f"--ros-args -r __ns:=/tortuga{i} "
                            f"-p robot_name:=tortuga{i} "
                            f"-p segment_minutes:={seg_minutes}")
-                # meme decalage anti-course qu'en cascade (voir LAUNCH_STAGGER)
-                time.sleep(LAUNCH_STAGGER)
             msg = ("Dataset started (recording!): " if m == "dataset"
                    else "Wander started: ") + ", ".join(f"t{i}" for i in present)
             root.after(0, lambda msg=msg: log(msg, "ok"))
             if m == "dataset":
-                root.after(0, lambda p=list(present): start_guard(p))
+                root.after(0, start_guard)
         root.after(0, lambda: launch_btn.config(state="normal"))
 
     threading.Thread(target=work, daemon=True).start()
 
 
-def behavior_stop_one(i):
-    # Arrete le comportement d'UN SEUL robot et le retire du watchdog. Les
-    # autres robots (et leur surveillance) ne sont pas touches.
-    stop_guard([i])
-    ssh_bg(i, "pkill -9 -f '[w]ander'; pkill -9 -f '[t]racker'; "
-              "pkill -TERM -f '[r]ecorder'; pkill -TERM -f '[b]ag record'")
-
-
 def behavior_stop(silent=False):
-    # Arrete les robots SELECTIONNES (chacun independamment). Aucun robot
-    # non selectionne n'est affecte.
+    stop_guard()
     present = present_indices() or list(ROBOTS)
     for i in present:
-        behavior_stop_one(i)
+        ssh_bg(i, "pkill -9 -f '[w]ander'; pkill -9 -f '[t]racker'; "
+                  "pkill -TERM -f '[r]ecorder'; pkill -TERM -f '[b]ag record'")
     if not silent:
         log("Mode stopped (bringup kept): "
             + ", ".join(f"t{i}" for i in present), "warn")
 
 
-# ---------------- Dataset watchdog (auto-stop, PAR ROBOT) ----------------
-# Pendant une session dataset, surveille pour CHAQUE robot INDEPENDAMMENT le
-# temps ecoule, la batterie (via le hub ROS) et l'espace disque (df en SSH).
-# Quand un robot franchit un seuil, LUI SEUL est arrete proprement (SIGTERM
-# recorder/rosbag, segments fermes) — les autres continuent d'enregistrer.
-# Bringup garde pour pouvoir rapatrier. Les seuils sont dans l'onglet "Dataset".
-dataset_guard = {"active": False}
-guarded = {}        # idx -> t0 (instant de demarrage propre a CE robot)
+# ---------------- Dataset watchdog (auto-stop) ----------------
+# During a dataset session, monitors ELAPSED time, battery VOLTAGE (via the ROS
+# hub) and FREE storage (df over SSH). When a threshold is crossed, the mode is
+# stopped CLEANLY (behavior_stop -> SIGTERM to recorder/rosbag, segments closed
+# properly). Bringup stays up so the data can be pulled. Thresholds live in the
+# "Dataset" inspection tab.
+dataset_guard = {"active": False, "t0": 0.0}
 
 
 def robot_free_gb(i):
@@ -593,75 +563,61 @@ def robot_free_gb(i):
         return None
 
 
-def start_guard(idxs=None):
-    # (Re)arme la surveillance pour CHAQUE robot donne, avec un t0 PROPRE. Ne
-    # remet PAS a zero le t0 des robots deja surveilles -> lancer un robot en
-    # plus n'affecte pas les autres.
-    now = time.time()
-    for i in (idxs if idxs is not None else present_indices()):
-        guarded[i] = now
-    if not dataset_guard["active"] and guarded:
-        dataset_guard["active"] = True
-        threading.Thread(target=guard_loop, daemon=True).start()
-    log("Dataset watchdog actif (par robot : duree · batterie · disque) : "
-        + ", ".join(f"t{i}" for i in sorted(guarded)))
+def start_guard():
+    dataset_guard["active"] = True
+    dataset_guard["t0"] = time.time()
+    threading.Thread(target=guard_loop, daemon=True).start()
+    log("Dataset watchdog active (duration · battery · storage).")
 
 
-def stop_guard(idxs=None):
-    # Desarme la surveillance de certains robots (idxs) ou de tous (None). Le
-    # thread s'arrete seul quand plus aucun robot n'est surveille.
-    if idxs is None:
-        guarded.clear()
-    else:
-        for i in idxs:
-            guarded.pop(i, None)
-    if not guarded:
-        dataset_guard["active"] = False
+def stop_guard():
+    dataset_guard["active"] = False
 
 
 def guard_loop():
     while dataset_guard["active"]:
-        dur = parse_num(dur_var.get())      # min ; 0 = illimite
-        batt = parse_num(batt_var.get())    # %  ; 0 = desactive
-        disk = parse_num(disk_var.get())    # GB ; 0 = desactive
-        # Chaque robot est evalue SEUL et arrete SEUL sur SON propre seuil :
-        # un robot qui tombe (batterie/disque/duree) n'affecte pas les autres.
-        for i in list(guarded.keys()):
-            reason = None
-            if dur > 0 and (time.time() - guarded[i]) >= dur * 60:
-                reason = f"duree {dur:.0f} min atteinte"
-            if reason is None and batt > 0:
+        reason = None
+        dur = parse_num(dur_var.get())      # min ; 0 = unlimited
+        batt = parse_num(batt_var.get())    # %  ; 0 = disabled
+        disk = parse_num(disk_var.get())    # GB ; 0 = disabled
+        targets_ = present_indices() or list(ROBOTS)
+        if dur > 0 and (time.time() - dataset_guard["t0"]) >= dur * 60:
+            reason = f"duration {dur:.0f} min reached"
+        if reason is None and batt > 0:
+            for i in targets_:
                 p = batt_pct(i)
                 if p is not None and p < batt:
-                    reason = f"batterie faible ({p:.0f}%)"
-            if reason is None and disk > 0:
+                    reason = f"tortuga{i} battery low ({p:.0f}%)"
+                    break
+        if reason is None and disk > 0:
+            for i in targets_:
                 free = robot_free_gb(i)
                 if free is not None and free < disk:
-                    reason = f"disque faible ({free:.1f} GB)"
-            if reason:
-                guarded.pop(i, None)
-                root.after(0, lambda r=reason, k=i: _auto_stop_one(r, k))
-        if not guarded:
+                    reason = f"tortuga{i} storage low ({free:.1f} GB)"
+                    break
+        if reason:
             dataset_guard["active"] = False
+            tg = list(targets_)
+            root.after(0, lambda r=reason, t=tg: _auto_stop(r, t))
             return
         time.sleep(15)
 
 
-def _auto_stop_one(reason, i):
-    # Ferme proprement CE robot uniquement (SIGTERM recorder/rosbag, stop wander).
-    behavior_stop_one(i)
-    # N'eteint le robot que si l'utilisateur l'a explicitement demande (off par
-    # defaut -> pas d'extinction surprise pendant les tests).
+def _auto_stop(reason, tg):
+    # Always close the recording cleanly (SIGTERM recorder/rosbag, stop wander).
+    behavior_stop()
+    # Only power OFF the robots if the user explicitly enabled it (off by
+    # default -> no surprise fleet shutdown while testing).
     if shutdown_var.get():
-        log(f"AUTO-STOP tortuga{i} : {reason} — fermeture puis EXTINCTION.",
+        log(f"AUTO-STOP dataset: {reason} — closing files then SHUTTING DOWN.",
             "warn")
         def later():
             time.sleep(5)
-            root.after(0, lambda: shutdown_robots([i]))
+            root.after(0, lambda: shutdown_robots(tg))
         threading.Thread(target=later, daemon=True).start()
     else:
-        log(f"AUTO-STOP tortuga{i} : {reason} — enregistrement arrete "
-            f"(bringup garde, pas d'extinction).", "warn")
+        log(f"AUTO-STOP dataset: {reason} — recording stopped (bringup kept, "
+            f"no shutdown).", "warn")
 
 
 def shutdown_robots(idxs):
