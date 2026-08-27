@@ -14,23 +14,23 @@ def generate_launch_description():
     slam = LaunchConfiguration('slam')
 
     # record : video + rosbag (scan/odom/imu).
-    # slam   : lance slam_toolbox pour cartographier la piece (map a la
-    #          demande). Independant de record.
+    # slam   : starts slam_toolbox to map the room (map on demand).
+    #          Independent of record.
     #
-    # NAMESPACE : le bringup TurtleBot3 applique DEJA le namespace via son
-    # propre argument (comme le GUI qui l'appelle avec namespace:=tortugaX).
-    # Il ne faut donc PAS l'envelopper en plus dans PushRosNamespace, sinon le
-    # namespace est applique DEUX fois -> /tortugaX/tortugaX/scan (double NS) :
-    # wander/rosbag ecoutent /tortugaX/scan et ne recoivent alors rien.
-    # -> On passe namespace:=ns a l'include (une seule fois), et on met
-    #    PushRosNamespace UNIQUEMENT autour de NOS noeuds.
+    # NAMESPACE: the TurtleBot3 bringup ALREADY applies the namespace through
+    # its own argument (as the GUI does when calling it with namespace:=tortugaX).
+    # So it must NOT be wrapped in PushRosNamespace on top of that, otherwise the
+    # namespace is applied TWICE -> /tortugaX/tortugaX/scan (double NS): wander
+    # and the rosbag listen on /tortugaX/scan and then receive nothing.
+    # -> We pass namespace:=ns to the include (once), and use PushRosNamespace
+    #    ONLY around OUR OWN nodes.
 
     return LaunchDescription([
         DeclareLaunchArgument('namespace', default_value='tortuga1'),
         DeclareLaunchArgument('record', default_value='true'),
         DeclareLaunchArgument('slam', default_value='false'),
 
-        # Bringup TurtleBot3 : namespace applique par SON argument (1 seule fois)
+        # TurtleBot3 bringup: namespace applied by ITS argument (only once)
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(PathJoinSubstitution([
                 FindPackageShare('turtlebot3_bringup'),
@@ -38,17 +38,18 @@ def generate_launch_description():
             launch_arguments={'namespace': ns}.items(),
         ),
 
-        # Nos noeuds a nous : un seul PushRosNamespace.
+        # Our own nodes: a single PushRosNamespace.
         GroupAction([
             PushRosNamespace(ns),
 
             Node(
                 package='camera_ros', executable='camera_node', name='camera',
-                # Dataset : 640x480 @ 55 fps. 18181 us/image = 55 fps (au-dessus
-                # du plancher hardware 16971, donc valide). Le recorder ecrit les
-                # JPEG NATIFS (image_raw/compressed) sans re-encoder -> le Pi
-                # tient 55 fps la ou un re-encodage video plafonnait a ~30.
-                # La borne force l'auto-expo a une pose courte (compense en gain).
+                # Dataset: 640x480 @ 55 fps. 18181 us/frame = 55 fps (above the
+                # 16971 hardware floor, so valid). The recorder writes the NATIVE
+                # JPEGs (image_raw/compressed) without re-encoding -> the Pi
+                # sustains 55 fps where video re-encoding capped out at ~30.
+                # The limit forces auto-exposure to a short exposure time
+                # (compensated by gain).
                 parameters=[{'format': 'BGR888', 'width': 640, 'height': 480,
                              'FrameDurationLimits': [18181, 18181]}],
                 remappings=[('~/image_raw', 'camera/image_raw')],
@@ -61,7 +62,7 @@ def generate_launch_description():
                  name='recorder', condition=IfCondition(record),
                  parameters=[{'robot_name': ns, 'segment_minutes': 5.0}]),
 
-            # SLAM a la demande (cartographie) — slam_toolbox en mode async
+            # SLAM on demand (mapping) — slam_toolbox in async mode
             Node(
                 package='slam_toolbox', executable='async_slam_toolbox_node',
                 name='slam_toolbox', condition=IfCondition(slam),

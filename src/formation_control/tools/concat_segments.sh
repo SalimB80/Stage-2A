@@ -1,19 +1,19 @@
 #!/bin/bash
-# concat_segments.sh — colle bout a bout les mp4 d'UNE session en un seul final.
+# concat_segments.sh — join the mp4 files of ONE session end to end into one final.
 #
-# assemble_video.sh produit un mp4 PAR segment :
+# assemble_video.sh produces one mp4 PER segment:
 #   tortuga1_20260716_175709_seg01.mp4 ... _seg05.mp4
-# Ce script les concatene dans l'ordre en :
+# This script concatenates them in order into:
 #   tortuga1_20260716_175709_final.mp4
 #
-#   ./concat_segments.sh <dossier> [prefixe_session]
+#   ./concat_segments.sh <folder> [session_prefix]
 #
-# - <dossier>  : dossier contenant les *_segNN.mp4 (ex: ./dataset_collected/tortuga1)
-# - prefixe    : optionnel. Sans lui, TOUTES les sessions du dossier sont
-#                traitees (une video finale par prefixe <robot>_<session>).
+# - <folder>  : folder holding the *_segNN.mp4 (e.g. ./dataset_collected/tortuga1)
+# - prefix    : optional. Without it, EVERY session in the folder is processed
+#               (one final video per <robot>_<session> prefix).
 #
-# Concatenation sans re-encodage (-c copy) quand c'est possible ; repli sur un
-# re-encodage si les segments ne sont pas copiables tels quels.
+# Concatenation without re-encoding (-c copy) whenever possible; falls back to a
+# re-encode when the segments cannot be copied as-is.
 
 DIR=${1%/}
 PREFIX=$2
@@ -32,7 +32,7 @@ ABS=$(cd "$DIR" && pwd)
 concat_one() {
   local prefix="$1"
   local out="$ABS/${prefix}_final.mp4"
-  # segments tries (seg01, seg02, ...) ; le tri lexical suffit (indices 2 chiffres)
+  # sorted segments (seg01, seg02, ...); a lexical sort is enough (2-digit index)
   local segs=()
   while IFS= read -r f; do segs+=("$f"); done \
     < <(ls -1 "$ABS/${prefix}"_seg*.mp4 2>/dev/null | sort)
@@ -40,14 +40,14 @@ concat_one() {
     echo "  (aucun segment mp4 pour $prefix)"; return 0
   fi
   if [ ${#segs[@]} -eq 1 ]; then
-    # une seule partie : on copie simplement en _final
+    # a single part: just copy it to _final
     cp -f "${segs[0]}" "$out"
     echo "  $prefix : 1 segment -> $(basename "$out")"; return 0
   fi
 
   local list; list=$(mktemp)
   for s in "${segs[@]}"; do
-    # echappe les quotes pour le demuxer concat
+    # escape the quotes for the concat demuxer
     printf "file '%s'\n" "${s//\'/\'\\\'\'}" >> "$list"
   done
 
@@ -66,7 +66,7 @@ concat_one() {
 if [ -n "$PREFIX" ]; then
   concat_one "$PREFIX"
 else
-  # decouvre tous les prefixes <robot>_<session> a partir des *_segNN.mp4
+  # discover every <robot>_<session> prefix from the *_segNN.mp4 files
   mapfile -t prefixes < <(
     ls -1 "$ABS"/*_seg*.mp4 2>/dev/null \
       | sed -E 's#.*/##; s/_seg[0-9]+\.mp4$//' | sort -u)

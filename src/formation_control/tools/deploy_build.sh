@@ -1,13 +1,13 @@
 #!/bin/bash
-# deploy_build.sh — copie le package sur chaque robot puis build a distance.
+# deploy_build.sh — copy the package onto each robot, then build it remotely.
 #
-# Robuste : un robot injoignable est IGNORE proprement (ne fait plus echouer
-# tout le deploiement, contrairement a l'ancien 'set -e'). Cree l'arborescence
-# manquante avant la copie. Affiche un RESUME clair par robot a la fin -> tu
-# vois d'un coup d'oeil lesquels ont bien recu le nouveau code.
+# Robust: an unreachable robot is skipped cleanly (it no longer fails the whole
+# deployment, unlike the old 'set -e'). Creates the missing directory tree
+# before copying. Prints a clear PER-ROBOT SUMMARY at the end -> you can see at
+# a glance which ones actually received the new code.
 #
-#   ./deploy_build.sh 2 3      -> tortuga2 et tortuga3
-#   ./deploy_build.sh          -> tente 1 2 3 4
+#   ./deploy_build.sh 2 3      -> tortuga2 and tortuga3
+#   ./deploy_build.sh          -> try 1 2 3 4
 
 ROBOTS=(1 2 3 4)
 PKG=~/formation_ws/src/formation_control
@@ -33,7 +33,7 @@ for i in "${ROBOTS[@]}"; do
     echo "  echec copie -> ignore"; ko+=("$i"); continue
   fi
 
-  # build ; on capture la sortie pour diagnostiquer un echec eventuel
+  # build; the output is captured so a failure can be diagnosed
   if sshpass -p "$PW" ssh -o StrictHostKeyChecking=no "$user@$ip" \
         "source /opt/ros/humble/setup.bash && cd ~/formation_ws && \
          colcon build --symlink-install" 2>&1 | tail -3; then
@@ -46,6 +46,6 @@ done
 echo "-------------------------------------------"
 echo "Deploy OK      : ${ok[*]:-aucun}"
 [ ${#ko[@]} -gt 0 ] && echo "Echecs/ignores : ${ko[*]}"
-# Echec (code 1) UNIQUEMENT si aucun robot n'a reussi.
+# Failure (exit 1) ONLY when no robot succeeded.
 [ ${#ok[@]} -eq 0 ] && exit 1
 exit 0

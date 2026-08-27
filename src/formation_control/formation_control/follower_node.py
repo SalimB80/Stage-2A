@@ -81,7 +81,7 @@ class FollowerNode(Node):
         if self.last_scan is not None:
             rng = range_from_lidar(self.last_scan, angle)
         if rng is None:
-            rng = 0.5 / max(area_ratio, 1e-3) ** 0.5  # fallback grossier
+            rng = 0.5 / max(area_ratio, 1e-3) ** 0.5  # coarse fallback
 
         e_range = rng - self.des_range
         e_bearing = angle - self.des_bearing

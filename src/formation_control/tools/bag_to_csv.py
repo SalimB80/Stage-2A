@@ -2,24 +2,24 @@
 """
 bag_to_csv.py — convert a ROS 2 bag (.db3 sqlite) into human-readable CSVs.
 
-Le mode dataset enregistre un rosbag `bag_<date>_<robot>` contenant les topics
-`.../scan` (LaserScan), `.../odom` (Odometry) et `.../imu` (Imu). Un `.db3` est
-une base SQLite illisible telle quelle : ce script la deserialise et ecrit UN
-CSV PAR TOPIC, place a cote de la video par defaut.
+The dataset mode records a rosbag `bag_<date>_<robot>` holding the topics
+`.../scan` (LaserScan), `.../odom` (Odometry) and `.../imu` (Imu). A `.db3` is a
+SQLite database that cannot be read as-is: this script deserialises it and writes
+ONE CSV PER TOPIC, next to the video by default.
 
-  ./bag_to_csv.py <bag.db3 | dossier_du_bag> [dossier_de_sortie]
+  ./bag_to_csv.py <bag.db3 | bag_folder> [output_folder]
 
-- Accepte un `.db3` isole OU un dossier de bag (plusieurs `*.db3` + metadata).
-- Sortie : <dossier_de_sortie>/<nom_du_bag>_<topic>.csv
-           (dossier_de_sortie par defaut = le dossier qui contient le .db3)
-- Deserialisation :
-    * si ROS 2 (rclpy) est source -> N'IMPORTE QUEL type de message (generique).
-    * sinon -> decodeur CDR interne pour LaserScan / Odometry / Imu (les topics
-      enregistres par ce projet), donc aucune dependance ROS necessaire sur le PC.
+- Accepts a standalone `.db3` OR a bag folder (several `*.db3` + metadata).
+- Output: <output_folder>/<bag_name>_<topic>.csv
+          (output_folder defaults to the folder containing the .db3)
+- Deserialisation:
+    * if ROS 2 (rclpy) is sourced -> ANY message type (generic path).
+    * otherwise -> built-in CDR decoder for LaserScan / Odometry / Imu (the
+      topics this project records), so no ROS dependency is needed on the PC.
 
-Chaque ligne porte `bag_time_ns` (horodatage de reception du bag) et, quand le
-message a un header, `stamp_sec` / `stamp_nanosec` — directement alignables avec
-frames.csv / scan.csv / odom.csv du recorder (meme horloge ROS).
+Every row carries `bag_time_ns` (the bag reception timestamp) and, when the
+message has a header, `stamp_sec` / `stamp_nanosec` — directly alignable with the
+recorder's frames.csv / scan.csv / odom.csv (same ROS clock).
 """
 
 import csv
@@ -31,16 +31,16 @@ import sys
 
 
 # --------------------------------------------------------------------------
-# Decodeur CDR minimal (fallback sans ROS) pour les types de ce projet.
-# CDR : 4 octets d'encapsulation en tete (le 2e octet code l'endianness), puis
-# les membres alignes sur leur taille RELATIVEMENT au debut du corps (apres ces
-# 4 octets). Sequences/strings = prefixe uint32 (longueur).
+# Minimal CDR decoder (ROS-free fallback) for the types used by this project.
+# CDR: a 4-byte encapsulation header (the 2nd byte encodes the endianness),
+# then members aligned on their own size RELATIVE to the start of the body
+# (after those 4 bytes). Sequences/strings are prefixed by a uint32 length.
 # --------------------------------------------------------------------------
 class _CDR:
     def __init__(self, data):
         self.buf = data
         self.little = len(data) >= 2 and (data[1] & 1) == 1
-        self.base = 4          # les membres s'alignent apres l'entete d'encaps.
+        self.base = 4          # members align after the encapsulation header
         self.pos = 4
 
     def _align(self, size):
@@ -112,10 +112,10 @@ def _decode_odometry(data):
     r['child_frame_id'] = c.string()
     px, py, pz = c.f64(), c.f64(), c.f64()
     qx, qy, qz, qw = c.f64(), c.f64(), c.f64(), c.f64()
-    c.f64_n(36)                                     # pose covariance (ignoree)
+    c.f64_n(36)                                     # pose covariance (ignored)
     lx, ly, lz = c.f64(), c.f64(), c.f64()
     ax, ay, az = c.f64(), c.f64(), c.f64()
-    c.f64_n(36)                                     # twist covariance (ignoree)
+    c.f64_n(36)                                     # twist covariance (ignored)
     import math
     yaw = math.atan2(2.0 * (qw * qz + qx * qy),
                      1.0 - 2.0 * (qy * qy + qz * qz))
@@ -149,7 +149,7 @@ _FALLBACK = {
 
 
 # --------------------------------------------------------------------------
-# Chemin generique via rclpy (n'importe quel type), si ROS 2 est source.
+# Generic path through rclpy (any message type), when ROS 2 is sourced.
 # --------------------------------------------------------------------------
 def _try_ros_deserializer(type_name):
     try:
@@ -165,7 +165,7 @@ def _try_ros_deserializer(type_name):
     def flatten(obj, prefix=''):
         out = {}
         fields = getattr(obj, 'get_fields_and_field_types', None)
-        if fields is None:                          # feuille (primitif)
+        if fields is None:                          # leaf (primitive)
             return {prefix.rstrip('.'): obj}
         for name in fields():
             val = getattr(obj, name)
@@ -186,7 +186,7 @@ def _try_ros_deserializer(type_name):
     def deser(data):
         msg = deserialize_message(bytes(data), msg_cls)
         row = flatten(msg)
-        # remonte le header a plat pour l'alignement temporel
+        # lift the header to the top level, for time alignment
         if 'header.stamp.sec' in row:
             row['stamp_sec'] = row.pop('header.stamp.sec')
             row['stamp_nanosec'] = row.pop('header.stamp.nanosec')
@@ -206,7 +206,7 @@ def _resolve_db3(path):
     base = os.path.basename(path)
     if base.endswith('.db3'):
         base = base[:-4]
-    # bag_..._tortuga1_0.db3 -> retire l'index de split final "_0"
+    # bag_..._tortuga1_0.db3 -> strip the trailing split index "_0"
     parts = base.rsplit('_', 1)
     if len(parts) == 2 and parts[1].isdigit():
         base = parts[0]
@@ -248,7 +248,7 @@ def convert(path, out_dir=None):
                     continue
                 try:
                     row = dec(data)
-                except Exception as e:            # message corrompu -> on saute
+                except Exception as e:            # corrupt message -> skip it
                     print(f"[bag_to_csv] {name}: message ignore ({e})")
                     continue
                 row = {'bag_time_ns': ts, **row}
@@ -261,8 +261,8 @@ def convert(path, out_dir=None):
               f"(types non supportes : {', '.join(sorted(skipped)) or '?'})")
         return 1
 
-    # Nom de fichier : nom COURT du topic (dernier segment) tant qu'il est
-    # unique ; sinon on retombe sur le chemin complet (generique, sans collision).
+    # File name: the SHORT topic name (last segment) as long as it is unique;
+    # otherwise fall back to the full path (generic, collision-free).
     leaves = {}
     for name in rows_by_topic:
         leaves.setdefault(name.rstrip('/').rsplit('/', 1)[-1], []).append(name)

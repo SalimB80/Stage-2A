@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-teleop_zqsd.py — Teleop clavier ZQSD robuste pour TurtleBot3.
+teleop_zqsd.py — robust ZQSD keyboard teleop for TurtleBot3.
 
-  Z : avancer        S : reculer
-  Q : tourner gauche D : tourner droite
-  A / E : avancer en tournant (gauche / droite)
-  ESPACE : stop
-  + / - : vitesse
-  X : quitter (stop + sortie propre)
+  Z : forward         S : backward
+  Q : turn left       D : turn right
+  A / E : forward while turning (left / right)
+  SPACE : stop
+  + / - : speed
+  X : quit (stop + clean exit)
 
-Particularites :
-  - Auto-detection du topic : on lui donne un nom de robot (ex: tortuga1),
-    il trouve TOUS les topics cmd_vel de ce robot (namespace simple OU double)
-    et publie sur tous -> marche quel que soit l'etat du namespace.
-  - Publication continue a 10 Hz de la derniere commande (maintien du
-    mouvement fluide + le robot s'arrete des qu'on quitte).
+Notable points:
+  - Topic auto-detection: give it a robot name (e.g. tortuga1) and it finds
+    ALL the cmd_vel topics of that robot (single OR double namespace) and
+    publishes on every one of them -> works whatever the namespace state is.
+  - The last command is republished continuously at 10 Hz (keeps the motion
+    smooth, and the robot stops as soon as we quit).
 
-Usage :
+Usage:
   ros2 run formation_control teleop_zqsd tortuga1
-  ros2 run formation_control teleop_zqsd /tortuga1/cmd_vel   (topic explicite)
+  ros2 run formation_control teleop_zqsd /tortuga1/cmd_vel   (explicit topic)
 """
 
 import sys
@@ -58,15 +58,15 @@ class TeleopZQSD(Node):
         self.pubs = []
         self.lin = 0.15
         self.ang = 0.8
-        self.cur = (0.0, 0.0)   # commande courante (facteurs)
+        self.cur = (0.0, 0.0)   # current command (unit factors)
 
     def setup_topics(self, target):
-        """target = nom de robot ('tortuga1') ou topic explicite ('/x/cmd_vel')."""
+        """target = robot name ('tortuga1') or explicit topic ('/x/cmd_vel')."""
         topics = []
         if target.startswith('/'):
             topics = [target]
         else:
-            # Laisse le graphe ROS se peupler puis cherche les cmd_vel du robot
+            # Let the ROS graph populate, then look for the robot's cmd_vel
             deadline = time.time() + 3.0
             found = set()
             while time.time() < deadline:
@@ -122,7 +122,7 @@ def main():
     try:
         while rclpy.ok():
             key = get_key(settings).lower()
-            if key == 'x' or key == '\x03':      # x ou Ctrl-C
+            if key == 'x' or key == '\x03':      # x or Ctrl-C
                 break
             elif key == ' ':
                 node.cur = (0.0, 0.0)
@@ -136,7 +136,7 @@ def main():
                 node.lin = max(0.02, node.lin - 0.02)
                 node.ang = max(0.2, node.ang - 0.1)
                 print(f"vitesse lin={node.lin:.2f} ang={node.ang:.2f}")
-            node.publish_current()               # ~10 Hz (timeout du get_key)
+            node.publish_current()               # ~10 Hz (get_key timeout)
             rclpy.spin_once(node, timeout_sec=0.0)
     except KeyboardInterrupt:
         pass

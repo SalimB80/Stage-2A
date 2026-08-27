@@ -16,10 +16,10 @@ def generate_launch_description():
     desired_bearing = LaunchConfiguration('desired_bearing')
     target_distance = LaunchConfiguration('target_distance')
 
-    # IMPORTANT : plus de PushRosNamespace ici.
-    # Le namespace est applique UNE SEULE FOIS, via l'attribut namespace=
-    # de chaque Node et via l'argument du bringup. PushRosNamespace + le
-    # namespace du bringup se cumulaient en /tortugaX/tortugaX/... .
+    # IMPORTANT: no more PushRosNamespace here.
+    # The namespace is applied ONLY ONCE, through each Node's namespace=
+    # attribute and through the bringup argument. PushRosNamespace plus the
+    # bringup namespace used to stack into /tortugaX/tortugaX/... .
 
     return LaunchDescription([
         DeclareLaunchArgument('namespace', default_value='tortuga1'),
@@ -30,7 +30,7 @@ def generate_launch_description():
         DeclareLaunchArgument('desired_bearing', default_value='0.0'),
         DeclareLaunchArgument('target_distance', default_value='0.6'),
 
-        # Bringup TurtleBot3 : on lui passe le namespace directement.
+        # TurtleBot3 bringup: the namespace is passed to it directly.
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(PathJoinSubstitution([
                 FindPackageShare('turtlebot3_bringup'),
@@ -38,7 +38,7 @@ def generate_launch_description():
             launch_arguments={'namespace': ns}.items(),
         ),
 
-        # Camera : namespace pose une seule fois via l'attribut namespace=
+        # Camera: namespace applied only once, via the namespace= attribute
         Node(
             package='camera_ros',
             executable='camera_node',

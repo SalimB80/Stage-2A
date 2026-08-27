@@ -1,19 +1,19 @@
 #!/bin/bash
-# dataset_tools.sh — pilote la session de collecte dataset depuis le PC.
+# dataset_tools.sh — drive the dataset collection session from the PC.
 #
-#   ./dataset_tools.sh start 1 2 3 4   -> lance errance+enregistrement
-#   ./dataset_tools.sh stop            -> arret PROPRE (recorder d'abord)
-#   ./dataset_tools.sh collect         -> rapatrie les videos + segments colles
-#                                         (_final.mp4) + rosbags convertis en CSV
-#   ./dataset_tools.sh drain 2 3       -> pull + purge EN CONTINU des segments
-#                                         termines (disque des Pi toujours bas)
-#   ./dataset_tools.sh concat 1 2      -> (re)colle les segments d'une session en
+#   ./dataset_tools.sh start 1 2 3 4   -> start wandering + recording
+#   ./dataset_tools.sh stop            -> CLEAN stop (recorder first)
+#   ./dataset_tools.sh collect         -> pull the videos + joined segments
+#                                         (_final.mp4) + rosbags converted to CSV
+#   ./dataset_tools.sh drain 2 3       -> CONTINUOUSLY pull and purge finished
+#                                         segments (keeps the Pi disks low)
+#   ./dataset_tools.sh concat 1 2      -> (re)join a session's segments into
 #                                         <robot>_<session>_final.mp4
-#   ./dataset_tools.sh bag2csv 1 2     -> convertit les rosbags .db3 deja rapatries
-#                                         en CSV (a cote des videos)
-#   ./dataset_tools.sh tidy 1 2        -> range un dossier deja rapatrie en
-#                                         sous-dossiers par session tortugaX_<session>/
-#   ./dataset_tools.sh space           -> espace disque restant par robot
+#   ./dataset_tools.sh bag2csv 1 2     -> convert the already-pulled .db3 rosbags
+#                                         to CSV (next to the videos)
+#   ./dataset_tools.sh tidy 1 2        -> tidy an already-pulled folder into
+#                                         per-session tortugaX_<session>/ subfolders
+#   ./dataset_tools.sh space           -> disk space left on each robot
 
 PW=1234
 ENV="export ROS_DOMAIN_ID=30; export TURTLEBOT3_MODEL=burger; \
@@ -44,8 +44,8 @@ assemble_dir() {
   bash "$ASM" "$d" "$ASM_FPS" "$d.mp4" >/dev/null 2>&1 && echo "  video: $d.mp4"
 }
 
-# Colle les segments mp4 de CHAQUE session d'un dossier robot en un seul
-# <robot>_<session>_final.mp4 (ordre seg01..segNN).
+# Join the mp4 segments of EVERY session in a robot folder into a single
+# <robot>_<session>_final.mp4 (in seg01..segNN order).
 finalize_videos() {
   local d="${1%/}"
   [ -d "$d" ] || return 0
@@ -55,8 +55,8 @@ finalize_videos() {
   bash "$CONCAT" "$d"
 }
 
-# Convertit chaque rosbag (.db3 isole OU dossier bag_*/) d'un dossier robot en
-# CSV, POSES A COTE des videos (meme dossier). Un CSV par topic (scan/odom/imu).
+# Convert every rosbag (standalone .db3 OR bag_*/ folder) of a robot folder to
+# CSV, placed NEXT TO the videos (same folder). One CSV per topic (scan/odom/imu).
 convert_bags() {
   local d="${1%/}"
   [ -d "$d" ] || return 0
@@ -68,9 +68,9 @@ convert_bags() {
   done
 }
 
-# Range un dossier robot "a plat" en sous-dossiers PAR SESSION
-# (tortugaX_<session>/ contenant sa video _final.mp4, ses segments et les CSV
-# du rosbag). Rattache chaque rosbag a la session video la plus proche.
+# Tidy a "flat" robot folder into PER-SESSION subfolders (tortugaX_<session>/
+# holding its _final.mp4 video, its segments and the rosbag CSVs). Attaches each
+# rosbag to the closest video session.
 tidy_dataset() {
   local d="${1%/}"
   [ -d "$d" ] || return 0
@@ -78,9 +78,9 @@ tidy_dataset() {
   python3 "$TIDY" "$d"
 }
 
-# Filet de securite : apres rangement, reconstruit toute video _final.mp4
-# manquante A PARTIR de raw/ (assemble les segments + concatene). Saute celles
-# deja OK, signale les sessions sans frames.
+# Safety net: after tidying, rebuild any missing _final.mp4 video FROM raw/
+# (assemble the segments + concatenate). Skips the ones already OK and reports
+# the sessions with no frames.
 rebuild_videos() {
   local d="${1%/}"
   [ -d "$d" ] || return 0
@@ -102,9 +102,9 @@ case $CMD in
   stop)
     for i in "${IDX[@]}"; do
       echo "=== tortuga$i : arret propre ==="
-      # SIGTERM au recorder ET au rosbag d'abord (fermeture propre des
-      # fichiers : un rosbag tue en -9 devient illisible sans 'ros2 bag
-      # reindex'), puis kill global.
+      # SIGTERM to the recorder AND the rosbag first (so the files are closed
+      # cleanly: a rosbag killed with -9 becomes unreadable without a
+      # 'ros2 bag reindex'), then a global kill.
       run_ssh $i "pkill -TERM -f '[r]ecorder'; \
                   pkill -TERM -f '[b]ag record'; sleep 2; \
                   pkill -9 -f '[r]os2 launch'; \
@@ -125,32 +125,32 @@ case $CMD in
       for d in ./dataset_collected/tortuga$i/*_seg*/; do
         assemble_dir "$d"
       done
-      # colle les segments d'une meme session en <robot>_<session>_final.mp4
+      # join the segments of one session into <robot>_<session>_final.mp4
       finalize_videos "./dataset_collected/tortuga$i"
-      # range tout par session : tortugaX_<session>/ (video + *_total.csv + raw/)
+      # tidy everything per session: tortugaX_<session>/ (video + *_total.csv + raw/)
       tidy_dataset "./dataset_collected/tortuga$i"
-      # filet de securite : reconstruit toute video manquante depuis raw/
+      # safety net: rebuild any missing video from raw/
       rebuild_videos "./dataset_collected/tortuga$i"
     done
     echo "Range par session dans ./dataset_collected/tortugaX/tortugaX_<session>/"
     echo "  (video _final.mp4 + frames/odom/scan_total.csv ; brut dans raw/)"
     ;;
   drain)
-    # Vide le disque des robots EN CONTINU pendant l'enregistrement.
-    # Le recorder ecrit des DOSSIERS de segment (*_segNN/ pleins de .jpg). Le
-    # dossier en cours est modifie en permanence (nouvelles images), les
-    # segments TERMINES ne le sont plus. On selectionne les dossiers non
-    # modifies depuis >1 min (-mmin +1) -> jamais le segment actif -> on
-    # rapatrie puis on SUPPRIME du robot (seulement apres un rsync reussi).
-    # Ainsi le disque des Pi reste a ~1-2 segments : capture 55 fps sans limite.
-    # Intervalle reglable : DRAIN_INTERVAL=90 ./dataset_tools.sh drain 2 3
+    # Empty the robots' disks CONTINUOUSLY while recording.
+    # The recorder writes segment FOLDERS (*_segNN/ full of .jpg). The current
+    # folder is modified constantly (new images), FINISHED segments are not.
+    # We select the folders untouched for >1 min (-mmin +1) -> never the active
+    # segment -> pull them, then DELETE them from the robot (only after a
+    # successful rsync). The Pi disks therefore stay at ~1-2 segments: 55 fps
+    # capture with no limit.
+    # Tunable interval: DRAIN_INTERVAL=90 ./dataset_tools.sh drain 2 3
     INTERVAL=${DRAIN_INTERVAL:-120}
     mkdir -p ./dataset_collected
     echo "Drain actif sur : ${IDX[*]} (intervalle ${INTERVAL}s). Ctrl-C pour arreter."
     while true; do
       for i in "${IDX[@]}"; do
         mkdir -p ./dataset_collected/tortuga$i
-        # dossiers de segment termines (non modifies depuis >1 min)
+        # finished segment folders (untouched for >1 min)
         DIRS=$(run_ssh $i "find ~/dataset -maxdepth 1 -type d -name '*_seg*' \
                 -mmin +1 -printf '%f\n' 2>/dev/null")
         [ -z "$DIRS" ] && continue
@@ -174,28 +174,28 @@ case $CMD in
     done
     ;;
   concat)
-    # (re)colle les segments deja rapatries en <robot>_<session>_final.mp4
+    # (re)join the already-pulled segments into <robot>_<session>_final.mp4
     for i in "${IDX[@]}"; do
       echo "=== tortuga$i ==="
       finalize_videos "./dataset_collected/tortuga$i"
     done
     ;;
   bag2csv)
-    # convertit les rosbags .db3 deja rapatries en CSV (a cote des videos)
+    # convert the already-pulled .db3 rosbags to CSV (next to the videos)
     for i in "${IDX[@]}"; do
       echo "=== tortuga$i ==="
       convert_bags "./dataset_collected/tortuga$i"
     done
     ;;
   rebuildvid)
-    # reconstruit les videos _final.mp4 manquantes depuis raw/ (deja range)
+    # rebuild the missing _final.mp4 videos from raw/ (already tidied)
     for i in "${IDX[@]}"; do
       echo "=== tortuga$i ==="
       rebuild_videos "./dataset_collected/tortuga$i"
     done
     ;;
   tidy)
-    # range un dossier deja rapatrie en sous-dossiers par session
+    # tidy an already-pulled folder into per-session subfolders
     for i in "${IDX[@]}"; do
       echo "=== tortuga$i ==="
       tidy_dataset "./dataset_collected/tortuga$i"
