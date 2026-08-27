@@ -127,9 +127,7 @@ Leave this running — it is the layer everything else sits on.
 **3 · MODE** — pick one, then *Start*:
 
 - **Wander** — autonomous exploration, lidar-only avoidance.
-- **Cascade** — driven leader + colour followers. Pick a formation
-  (`column`, `line`, `triangle`, `square`) in the dropdown; *Apply live* changes
-  it without restarting anything.
+- **Cascade** — driven leader + colour followers.
 - **Dataset** — wander + video and lidar recording.
 
 *Stop mode* stops the behaviour without touching the hardware layer, so you can
