@@ -435,6 +435,40 @@ def bringup_start():
                f"-r ~/image_raw:=camera/image_raw")
     log("Bringup + camera started: " + ", ".join(f"t{i}" for i in present)
         + " (~15 s to boot).", "ok")
+    # Le fps fixe au LANCEMENT ne "prend" pas (l'auto-expo reprend la main ->
+    # ~18 fps). On verrouille donc le fps A CHAUD, en local sur chaque robot,
+    # une fois la camera demarree (~15 s). C'est ce qui donne les ~50 fps.
+    def _auto_lock():
+        time.sleep(16)
+        lock_camera_fps(present, announce=True)
+    threading.Thread(target=_auto_lock, daemon=True).start()
+
+
+# Chemin du tool camera_fps.py sur les robots (deploye avec le package).
+CAMERA_FPS_TOOL = "~/formation_ws/src/formation_control/tools/camera_fps.py"
+
+
+def lock_camera_fps(indices=None, announce=True):
+    """Verrouille le fps camera A CHAUD (lock=True) sur chaque robot, en LOCAL
+    (via SSH) -> le reglage s'impose la ou le param de lancement echoue.
+    Optionnellement remonte AnalogueGain pour compenser la pose plus courte."""
+    idx = indices if indices is not None else present_indices()
+    if not idx:
+        log("Select at least one robot.", "warn")
+        return
+    fps = parse_num(cam_fps_var.get(), 55.0)
+    gain = parse_num(cam_gain_var.get(), 0.0)
+    for i in idx:
+        cmd = (robot_env() +
+               f"python3 {CAMERA_FPS_TOOL} --node /tortuga{i}/camera "
+               f"--fps {float(fps)}")
+        if gain and gain > 0:
+            cmd += f"; ros2 param set /tortuga{i}/camera AnalogueGain {float(gain)}"
+        ssh_bg(i, cmd)
+    if announce:
+        g = f", gain {gain:g}" if gain and gain > 0 else ""
+        log(f"Camera FPS verrouille a {fps:g}{g} sur : "
+            + ", ".join(f"t{i}" for i in idx), "ok")
 
 
 def bringup_stop():
@@ -1072,6 +1106,22 @@ tk.Button(r1, text="Start robot", command=bringup_start,
 tk.Button(r1, text="Stop", command=bringup_stop,
           bg=C_PANE, fg=C_SUB, bd=0, font=(FONT, 9), cursor="hand2",
           activebackground=C_PANE2, padx=14).pack(side="left")
+
+# Verrouillage fps camera (applique auto ~16 s apres bringup, ou a la demande).
+# Le fps fixe au lancement ne tient pas -> on l'impose a chaud, en local.
+cam_fps_var = tk.StringVar(value="55")
+cam_gain_var = tk.StringVar(value="8")
+r1b = tk.Frame(body, bg=C_BG)
+r1b.pack(fill="x", pady=(4, 0))
+tk.Label(r1b, text="Cam FPS", bg=C_BG, fg=C_SUB, font=(FONT, 9)).pack(side="left")
+tk.Entry(r1b, textvariable=cam_fps_var, width=4, font=(MONO, 10), bg="#fff",
+         fg=C_TXT, relief="solid", bd=1, justify="right").pack(side="left", padx=(4, 8))
+tk.Label(r1b, text="Gain", bg=C_BG, fg=C_SUB, font=(FONT, 9)).pack(side="left")
+tk.Entry(r1b, textvariable=cam_gain_var, width=4, font=(MONO, 10), bg="#fff",
+         fg=C_TXT, relief="solid", bd=1, justify="right").pack(side="left", padx=(4, 8))
+tk.Button(r1b, text="Lock FPS", command=lambda: lock_camera_fps(),
+          bg=C_PANE, fg=C_SUB, bd=0, font=(FONT, 9), cursor="hand2",
+          activebackground=C_PANE2, padx=10).pack(side="left")
 
 hsep(body)
 
