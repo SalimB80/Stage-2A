@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # ============================================================
-#  ttb.sh - Controle unifie de la flotte TurtleBot3
+#  ttb.sh - unified control of the TurtleBot3 fleet
 # ============================================================
-#  Usage :
-#    ./ttb.sh deploy  [N]              copie + build sur N robots
-#    ./ttb.sh start   [N] [formation]  lance bringup + followers
-#    ./ttb.sh stop    [N]              arrete tous les noeuds
-#    ./ttb.sh monitor [N]              grille tmux des logs
-#    ./ttb.sh teleop                   pilote le leader au clavier
-#    ./ttb.sh formation [N] [form]     change la formation a chaud
+#  Usage:
+#    ./ttb.sh deploy  [N]              copy + build on N robots
+#    ./ttb.sh start   [N] [formation]  start bringup + followers
+#    ./ttb.sh stop    [N]              stop every node
+#    ./ttb.sh monitor [N]              tmux grid of the logs
+#    ./ttb.sh teleop                   drive the leader from the keyboard
+#    ./ttb.sh formation [N] [form]     change the formation at runtime
 #
-#  Defauts : N=4, formation=colonne
-#  Formations : colonne | ligne | triangle | carre
-#  Prerequis WSL : sudo apt install sshpass rsync tmux
+#  Defaults: N=4, formation=colonne
+#  Formations: colonne | ligne | triangle | carre
+#  WSL prerequisites: sudo apt install sshpass rsync tmux
 # ============================================================
 set -e
 
@@ -28,12 +28,12 @@ source ~/formation_ws/install/setup.bash;"
 user_of() { echo "tortuga$1"; }
 ip_of()   { echo "192.168.0.20$1"; }
 
-ssh_run() {  # ssh_run <i> <commande...>
+ssh_run() {  # ssh_run <i> <command...>
   local i=$1; shift
   sshpass -p "$PASS" ssh $SSH_OPTS "$(user_of $i)@$(ip_of $i)" "$@"
 }
 
-ssh_bg() {   # ssh_bg <i> <commande...>  (arriere-plan + log)
+ssh_bg() {   # ssh_bg <i> <command...>  (background + log)
   local i=$1; shift
   sshpass -p "$PASS" ssh $SSH_OPTS "$(user_of $i)@$(ip_of $i)" \
     "$ENV nohup bash -c '$*' > ~/ros_$i.log 2>&1 &"

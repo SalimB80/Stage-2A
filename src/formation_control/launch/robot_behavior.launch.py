@@ -9,18 +9,19 @@ def generate_launch_description():
     ns = LaunchConfiguration('namespace')
     mode = LaunchConfiguration('mode')          # errance | cascade | dataset
     idx = LaunchConfiguration('robot_index')
-    role = LaunchConfiguration('role')          # leader | tracker (mode cascade)
+    role = LaunchConfiguration('role')          # leader | tracker (cascade mode)
     target_color = LaunchConfiguration('target_color')
     desired_bearing = LaunchConfiguration('desired_bearing')
     target_distance = LaunchConfiguration('target_distance')
     record = LaunchConfiguration('record')
 
-    # COUCHE 2 — COMPORTEMENT. Se branche sur un bringup DEJA actif.
-    # Ne (re)demarre NI bringup NI camera. On peut le tuer/relancer pour
-    # changer de mode sans toucher a la couche 1.
-    #   errance  -> wander seul
+    # LAYER 2 — BEHAVIOUR. Plugs into an ALREADY RUNNING bringup.
+    # It (re)starts NEITHER bringup NOR camera. It can be killed/relaunched to
+    # switch mode without touching layer 1.
+    #   errance  -> wander alone
     #   dataset  -> wander + recorder + rosbag
-    #   cascade  -> tracker (si role=tracker ; leader = rien, juste pilote)
+    #   cascade  -> tracker (when role=tracker; the leader runs nothing, it is
+    #               simply driven by hand)
 
     is_wander = PythonExpression(
         ["'", mode, "' == 'errance' or '", mode, "' == 'dataset'"])
@@ -38,7 +39,7 @@ def generate_launch_description():
         DeclareLaunchArgument('target_distance', default_value='0.6'),
         DeclareLaunchArgument('record', default_value='false'),
 
-        # Errance / dataset -> wander
+        # Wander / dataset -> wander
         Node(package='formation_control', executable='wander', name='wander',
              namespace=ns, condition=IfCondition(is_wander)),
 
@@ -49,10 +50,10 @@ def generate_launch_description():
                           'desired_bearing': desired_bearing,
                           'target_distance': target_distance}]),
 
-        # Dataset -> recorder SEUL (pas de rosbag). Le recorder ecrit deja les
-        # frames JPEG + frames.csv / odom.csv / scan.csv (horodates, alignes a la
-        # video). Le rosbag .db3 faisait doublon (scan/odom deja couverts, seul
-        # l'IMU etait en plus) et n'est pas voulu -> supprime.
+        # Dataset -> recorder ONLY (no rosbag). The recorder already writes the
+        # JPEG frames + frames.csv / odom.csv / scan.csv (timestamped, aligned
+        # with the video). The .db3 rosbag was redundant (scan/odom already
+        # covered, only the IMU was extra) and is not wanted -> removed.
         Node(package='formation_control', executable='recorder', name='recorder',
              namespace=ns, condition=IfCondition(is_dataset),
              parameters=[{'robot_name': ns, 'segment_minutes': 5.0}]),

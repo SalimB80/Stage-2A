@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-lidar_monitor.py — moniteur lidar temps reel dans le terminal.
+lidar_monitor.py — real-time lidar monitor in the terminal.
 
-Repond a UNE question : le lidar voit-il les obstacles ?
-Affiche la distance dans 8 secteurs autour du robot + alerte obstacle.
-Gere les lidars en [0, 2pi] comme en [-pi, pi].
+Answers ONE question: does the lidar see the obstacles?
+Shows the distance in 8 sectors around the robot + an obstacle alert.
+Handles [0, 2pi] lidars as well as [-pi, pi] ones.
 
-Usage : python3 lidar_monitor.py tortuga3
+Usage: python3 lidar_monitor.py tortuga3
 """
 
 import sys
@@ -17,7 +17,7 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
 import numpy as np
 
-# Secteurs : nom -> angle central (deg, 0=avant, +=gauche), demi-largeur deg
+# Sectors: name -> centre angle (deg, 0=front, +=left), half-width in deg
 SECTORS = [
     ("AVANT      ",   0, 15),
     ("av-gauche  ",  45, 20),
@@ -28,7 +28,7 @@ SECTORS = [
     ("DROIT      ", 270, 20),
     ("av-droit   ", 315, 20),
 ]
-ALERT = 0.40   # m : seuil d'alerte obstacle
+ALERT = 0.40   # m: obstacle alert threshold
 
 
 class LidarMonitor(Node):
@@ -67,7 +67,7 @@ class LidarMonitor(Node):
         if self.msg is None:
             print("  ... aucune donnee lidar recue pour l'instant ...")
             return
-        # efface l'ecran (retour propre a chaque rafraichissement)
+        # clear the screen (clean redraw on every refresh)
         print("\033[2J\033[H", end="")
         print(f"  LIDAR  {self.topic}   (alerte < {ALERT:.2f} m)\n")
         n_pts = len(self.msg.ranges)

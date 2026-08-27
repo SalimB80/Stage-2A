@@ -9,11 +9,11 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     ns = LaunchConfiguration('namespace')
 
-    # COUCHE 1 — BRINGUP. Demarre tout le materiel : moteurs, lidar, camera.
-    # Reste allume en permanence ; les comportements (errance/cascade/dataset)
-    # se lancent SEPAREMENT par-dessus, sans couper ceci.
-    # Le bringup TurtleBot3 pousse deja le namespace -> on lui passe en
-    # argument, on ne le re-pousse pas. Camera avec namespace=ns.
+    # LAYER 1 — BRINGUP. Starts all the hardware: motors, lidar, camera.
+    # It stays up permanently; the behaviours (wander/cascade/dataset) are
+    # launched SEPARATELY on top of it, without shutting this down.
+    # The TurtleBot3 bringup already pushes the namespace -> we pass it as an
+    # argument instead of pushing it again. Camera uses namespace=ns.
 
     return LaunchDescription([
         DeclareLaunchArgument('namespace', default_value='tortuga1'),
@@ -28,7 +28,7 @@ def generate_launch_description():
         Node(
             package='camera_ros', executable='camera_node', name='camera',
             namespace=ns,
-            # 640x480 @ 55 fps : 18181 us/image (voir robot_dataset.launch.py).
+            # 640x480 @ 55 fps: 18181 us/frame (see robot_dataset.launch.py).
             parameters=[{'format': 'BGR888', 'width': 640, 'height': 480,
                          'FrameDurationLimits': [18181, 18181]}],
             remappings=[('~/image_raw', 'camera/image_raw')],

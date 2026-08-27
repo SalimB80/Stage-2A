@@ -1,7 +1,7 @@
 import math
 
-# Pour chaque formation : dict robot_index -> (range_m, bearing_deg)
-# bearing > 0 = leader vu a gauche -> le follower se place a droite.
+# For each formation: dict robot_index -> (range_m, bearing_deg)
+# bearing > 0 = leader seen on the left -> the follower takes the right side.
 FORMATIONS = {
     "colonne": {
         2: (0.6, 0.0),
@@ -27,7 +27,7 @@ FORMATIONS = {
 
 
 def get_offset(formation, robot_index):
-    """Retourne (range_m, bearing_rad). Fallback colonne si absent."""
+    """Return (range_m, bearing_rad). Falls back to "colonne" when missing."""
     table = FORMATIONS.get(formation, FORMATIONS["colonne"])
     rng, bearing_deg = table.get(robot_index, (0.6 * (robot_index - 1), 0.0))
     return rng, math.radians(bearing_deg)

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-hsv_tuner.py v2 — calibration HSV sur la camera du robot, par le reseau.
+hsv_tuner.py v2 — HSV calibration on the robot camera, over the network.
 
-v2 : s'abonne au flux COMPRESSE (JPEG, leger) en priorite, avec QoS capteur.
-Le flux brut (14 Mo/s) ne passe pas en Wi-Fi -> ecran noir. Le compresse
-passe sans souci. Repli automatique sur le brut si le compresse n'existe pas.
+v2: subscribes to the COMPRESSED stream (JPEG, lightweight) first, with sensor
+QoS. The raw stream (14 MB/s) does not get through Wi-Fi -> black screen. The
+compressed one goes through easily. Automatic fallback to raw when the
+compressed topic does not exist.
 
-Usage : python3 hsv_tuner.py tortuga3
-Touches : P = imprimer seuils | 1/2/3 = presets jaune/cyan/rouge | ECHAP = quitter
+Usage: python3 hsv_tuner.py tortuga3
+Keys: P = print thresholds | 1/2/3 = yellow/cyan/red presets | ESC = quit
 """
 
 import sys
@@ -32,7 +33,7 @@ class HsvTuner(Node):
         self.bridge = CvBridge()
         self.frame = None
         self.source = None
-        # Compresse (prioritaire, leger) ET brut (repli) — QoS capteur
+        # Compressed (preferred, lightweight) AND raw (fallback) — sensor QoS
         self.create_subscription(
             CompressedImage, base + '/compressed', self.cb_comp,
             qos_profile_sensor_data)
@@ -51,7 +52,7 @@ class HsvTuner(Node):
 
     def cb_raw(self, msg):
         if self.source == 'compressed':
-            return          # le compresse arrive, on ignore le brut
+            return          # the compressed stream is arriving, ignore the raw one
         try:
             self.frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
             if self.source != 'raw':

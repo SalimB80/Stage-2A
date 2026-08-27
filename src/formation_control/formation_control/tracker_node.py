@@ -1,37 +1,38 @@
 #!/usr/bin/env python3
 """
-tracker_node.py v4 — suivi autonome d'une couleur, RELAIS LIDAR pour la CASCADE.
+tracker_node.py v4 — autonomous colour following, LIDAR RELAY for the CASCADE.
 
-Cascade multi-couleurs : chaque robot traque le casque du robot qui le
-precede. tortuga1 = casque JAUNE (leader pilote), tortuga2 (ROUGE) suit le
-jaune, tortuga3 (VERT) suit le rouge, tortuga4 (BLEU) suit le vert.
+Multi-colour cascade: each robot tracks the helmet of the robot in front of
+it. tortuga1 = YELLOW helmet (the human-driven leader), tortuga2 (RED) follows
+the yellow one, tortuga3 (GREEN) follows the red one, tortuga4 (BLUE) follows
+the green one.
 
-Parametres cles :
-  target_color    : jaune|rouge|vert|bleu|cyan (alias anglais acceptes :
+Key parameters:
+  target_color    : jaune|rouge|vert|bleu|cyan (English aliases accepted:
                     yellow|red|green|blue) | 'custom'
-  desired_bearing : angle (deg) ou la cible doit apparaitre. 0 = colonne ;
-                    +30/-30 = formations en V aplati (ligne, triangle).
-  target_distance : distance a tenir (m). DEFAUT 0.32 (32 cm). Reglable par
-                    robot, a chaud :
+  desired_bearing : angle (deg) at which the target should appear. 0 = column;
+                    +30/-30 = flattened-V formations (line, triangle).
+  target_distance : distance to hold (m). DEFAULT 0.32 (32 cm). Tunable per
+                    robot, at runtime:
                       ros2 param set /tortugaX/tracker target_distance 0.40
 
->>> CALIBRATION : apres passage de hsv_tuner.py au labo, reporter les seuils
->>> mesures dans le dict COLORS ci-dessous (un seul endroit a editer).
+>>> CALIBRATION: after a hsv_tuner.py session in the lab, copy the measured
+>>> thresholds into the COLORS dict below (the single place to edit).
 
-v4 (RELAIS LIDAR) — le point cle demande : la chaine ne doit PAS casser
-quand la vision perd la couleur une fraction de seconde. Principe :
-  1. la COULEUR sert a identifier QUI suivre (le bon casque) et donne la
-     direction ;
-  2. des qu'un casque est vu, on ARME un verrou (lock) sur cette direction ;
-  3. si la couleur disparait, le LIDAR PREND LE RELAIS : il traque le petit
-     blob (~6 cm de diametre = un TurtleBot) le plus proche autour de la
-     derniere direction connue, et continue de suivre a target_distance ;
-  4. on ne repasse en RECHERCHE (rotation sur place) qu'apres avoir perdu
-     ET la couleur ET le blob lidar pendant lidar_lost_time secondes.
-Resultat : un robot qui « cligne » ne s'egare plus, il reste accroche au
-robot de devant via le lidar en attendant de revoir la couleur.
+v4 (LIDAR RELAY) — the key requirement: the chain must NOT break when vision
+loses the colour for a fraction of a second. Principle:
+  1. the COLOUR identifies WHO to follow (the right helmet) and gives the
+     direction;
+  2. as soon as a helmet is seen, a lock is ARMED on that direction;
+  3. if the colour disappears, the LIDAR TAKES OVER: it tracks the small blob
+     (~6 cm across = a TurtleBot) nearest to the last known direction, and
+     keeps following at target_distance;
+  4. we only fall back to SEARCH (spin in place) after having lost BOTH the
+     colour AND the lidar blob for lidar_lost_time seconds.
+Outcome: a robot that "blinks" no longer wanders off, it stays hooked to the
+robot ahead through the lidar while waiting to see the colour again.
 
-Etats : AVOID (prioritaire) > ARRIVED > TRACK (couleur) > LIDAR (relais) >
+States: AVOID (highest priority) > ARRIVED > TRACK (colour) > LIDAR (relay) >
         COAST > SEARCH.
 """
 
@@ -48,9 +49,9 @@ import numpy as np
 from rclpy.qos import qos_profile_sensor_data
 
 # ---------------------------------------------------------------------------
-# PRESETS COULEURS (HSV OpenCV : H 0-179, S 0-255, V 0-255)
-# A REMPLACER par les valeurs calibrees avec hsv_tuner.py sous l'eclairage
-# du labo. Le ROUGE est a cheval sur H=0/179 -> DEUX plages combinees.
+# COLOUR PRESETS (OpenCV HSV: H 0-179, S 0-255, V 0-255)
+# TO BE REPLACED by the values calibrated with hsv_tuner.py under the lab
+# lighting. RED straddles H=0/179 -> TWO ranges combined.
 # ---------------------------------------------------------------------------
 COLORS = {
     "jaune": {"ranges": [([20, 80, 80],  [35, 255, 255])]},
@@ -60,7 +61,7 @@ COLORS = {
     "vert":  {"ranges": [([40, 70, 60],  [85, 255, 255])]},
     "bleu":  {"ranges": [([100, 120, 60], [130, 255, 255])]},
 }
-# Alias anglais -> noms internes (le GUI peut envoyer l'un ou l'autre).
+# English aliases -> internal names (the GUI may send either one).
 COLOR_ALIASES = {"yellow": "jaune", "red": "rouge", "green": "vert",
                  "blue": "bleu", "cyan": "cyan"}
 
@@ -70,15 +71,15 @@ class TrackerNode(Node):
         super().__init__("tracker")
 
         self.declare_parameter("target_color", "jaune")
-        self.declare_parameter("hsv_low",  [0, 0, 0])      # si target_color=custom
+        self.declare_parameter("hsv_low",  [0, 0, 0])      # if target_color=custom
         self.declare_parameter("hsv_high", [0, 0, 0])
-        self.declare_parameter("target_distance", 0.32)     # DEFAUT 32 cm
-        self.declare_parameter("desired_bearing", 0.0)      # degres
+        self.declare_parameter("target_distance", 0.32)     # DEFAULT 32 cm
+        self.declare_parameter("desired_bearing", 0.0)      # degrees
         self.declare_parameter("min_area", 800)
         self.declare_parameter("area_near", 12000)
-        # area_near : surface (px^2) du casque au-dela de laquelle on est
-        # PRES de la cible -> arret de l'avance MEME si le lidar pretend
-        # qu'elle est loin. Frein camera independant du lidar.
+        # area_near: helmet area (px^2) beyond which we are CLOSE to the
+        # target -> stop advancing EVEN IF the lidar claims it is far away.
+        # A camera-side brake, independent of the lidar.
         self.declare_parameter("camera_hfov_deg", 62.0)
         self.declare_parameter("v_search", 0.10)
         self.declare_parameter("w_search", 0.6)
@@ -86,37 +87,37 @@ class TrackerNode(Node):
         self.declare_parameter("w_max", 1.2)
         self.declare_parameter("k_lin", 0.6)
         self.declare_parameter("k_ang", 1.8)
-        self.declare_parameter("obstacle_dist", 0.45)  # ALIGNE wander (0.50) :
-        #   un obstacle non-cible declenche l'evitement des 0.45 m.
-        self.declare_parameter("safety_dist", 0.26)    # ALIGNE wander : deux
-        #   carrosseries de 16 cm + chassis qui depassent du lidar -> on ne
-        #   descend JAMAIS sous 0.26 m lidar (recul si plus pres).
-        self.declare_parameter("arrive_dist", 0.32)    # arret d'approche cale
-        #   sur target_distance par defaut ; recalcule si distance changee.
+        self.declare_parameter("obstacle_dist", 0.45)  # ALIGNED with wander
+        #   (0.50): a non-target obstacle triggers avoidance from 0.45 m.
+        self.declare_parameter("safety_dist", 0.26)    # ALIGNED with wander:
+        #   two 16 cm bodies + chassis overhanging the lidar -> we NEVER go
+        #   below 0.26 m of lidar range (back off if closer).
+        self.declare_parameter("arrive_dist", 0.32)    # approach stop, aligned
+        #   on target_distance by default; recompute if the distance changes.
         self.declare_parameter("lidar_cone_deg", 8.0)
         self.declare_parameter("align_tol_deg", 20.0)
         self.declare_parameter("coast_time", 0.4)
         self.declare_parameter("v_avoid", 0.08)
         self.declare_parameter("area_when_near", 5000)
-        # area_when_near : si un obstacle est proche ET aligne avec la
-        # couleur mais que le casque est PETIT a l'image, ce n'est pas la
-        # cible -> obstacle, on evite.
+        # area_when_near: if an obstacle is close AND aligned with the
+        # colour but the helmet is SMALL in the image, it is not the target
+        # -> it is an obstacle, so avoid it.
         self.declare_parameter("stuck_time", 1.0)
         self.declare_parameter("escape_time", 1.3)
         self.declare_parameter("search_spin_only", True)
 
-        # ---- RELAIS LIDAR (v4) --------------------------------------------
+        # ---- LIDAR RELAY (v4) ---------------------------------------------
         self.declare_parameter("track_cone_deg", 35.0)
-        #   demi-cone de recherche du blob autour de la derniere direction vue.
+        #   half-cone searched for the blob around the last seen direction.
         self.declare_parameter("max_track_dist", 2.0)
-        #   au-dela de 2 m on ne fait plus confiance au blob (autre robot/mur).
+        #   beyond 2 m the blob is no longer trusted (another robot/a wall).
         self.declare_parameter("lidar_lost_time", 3.0)
-        #   duree SANS couleur NI blob avant de repasser en recherche.
+        #   time WITHOUT colour NOR blob before falling back to search.
         self.declare_parameter("blob_depth", 0.15)
-        #   tolerance radiale pour agreger les points d'un meme blob (m).
+        #   radial tolerance used to aggregate the points of one blob (m).
         self.declare_parameter("blob_max_width", 0.35)
-        #   largeur physique max d'un blob accepte comme robot (m). Au-dela
-        #   c'est un mur/meuble -> ignore.
+        #   max physical width of a blob accepted as a robot (m). Wider than
+        #   that means a wall/furniture -> ignored.
 
         self.bridge = CvBridge()
         self.img_w = 640
@@ -138,19 +139,19 @@ class TrackerNode(Node):
         self.search_dir = random.choice([-1.0, 1.0])
         self.search_switch = self.get_clock().now()
 
-        # verrou de suivi (couleur puis relais lidar)
+        # tracking lock (colour first, then lidar relay)
         self.lock_active = False
         self.lidar_lock_ok = False
         self.lidar_lock_angle = 0.0
         self.lidar_lock_dist = 99.0
 
-        # Compteurs de messages recus : diagnostic terminal (mismatch QoS).
+        # Received-message counters: terminal diagnostics (QoS mismatch).
         self.cam_count = 0
         self.scan_count = 0
         self.odom_count = 0
 
         self.cmd_pub = self.create_publisher(Twist, "cmd_vel", 10)
-        # QoS capteurs (BEST_EFFORT) : un subscriber RELIABLE ne recoit RIEN.
+        # Sensor QoS (BEST_EFFORT): a RELIABLE subscriber receives NOTHING.
         self.create_subscription(Image, "camera/image_raw", self.camera_cb,
                                  qos_profile_sensor_data)
         self.create_subscription(LaserScan, "scan", self.lidar_cb,
@@ -168,11 +169,11 @@ class TrackerNode(Node):
             f"bearing {bear:.0f} deg")
 
     def _color_name(self):
-        """Nom de couleur normalise (accepte les alias anglais du GUI)."""
+        """Normalised colour name (accepts the GUI's English aliases)."""
         col = self.get_parameter("target_color").value
         return COLOR_ALIASES.get(col, col)
 
-    # ---------- masque couleur (gere le rouge double-plage) ----------
+    # ---------- colour mask (handles the double-range red) ----------
     def color_mask(self, hsv):
         col = self._color_name()
         if col == "custom":
@@ -210,7 +211,7 @@ class TrackerNode(Node):
             self.target_angle = -((self.color_cx - w/2.0)/(w/2.0))*(fov/2.0)
             self.last_target_angle = self.target_angle
             self.color_seen = True
-            self.lock_active = True          # couleur vue -> on (re)verrouille
+            self.lock_active = True          # colour seen -> (re)arm the lock
         else:
             self.color_seen = False
 
@@ -220,9 +221,9 @@ class TrackerNode(Node):
         self.odom_speed = math.sqrt(v.x*v.x + v.y*v.y)
 
     # ---------- LIDAR ----------
-    # NB : certains lidars publient sur [0, 2pi]. Les angles camera (negatifs
-    # a droite) sont normalises dans le repere du scan, et les fenetres
-    # d'indices BOUCLENT (modulo n) car 359 deg et 1 deg sont voisins.
+    # NB: some lidars publish over [0, 2pi]. Camera angles (negative on the
+    # right) are normalised into the scan frame, and the index windows WRAP
+    # AROUND (modulo n) because 359 deg and 1 deg are neighbours.
     def lidar_cb(self, msg):
         self.scan_count += 1
         ranges = np.array(msg.ranges)
@@ -237,8 +238,8 @@ class TrackerNode(Node):
                 a -= two_pi
             return int((a - msg.angle_min) / msg.angle_increment) % n
 
-        # distance cible (frein) : point le plus proche dans un cone etroit
-        # autour de la direction couleur/verrou.
+        # target distance (brake): nearest point in a narrow cone around the
+        # colour/lock direction.
         angle = self.target_angle if self.color_seen else self.last_target_angle
         c = idx_of(angle)
         half = int(math.radians(
@@ -248,7 +249,7 @@ class TrackerNode(Node):
         valid = win[(win > 0.10) & (win < 5.0)]
         self.target_distance = float(np.min(valid)) if len(valid) else 99.0
 
-        # secteur frontal (evitement)
+        # front sector (avoidance)
         fhalf = int(math.radians(60.0)/msg.angle_increment)
         z = idx_of(0.0)
         fidxs = np.arange(z - fhalf, z + fhalf + 1) % n
@@ -262,14 +263,14 @@ class TrackerNode(Node):
         else:
             self.nearest_dist, self.nearest_angle = 99.0, 0.0
 
-        # RELAIS LIDAR : cherche le blob "robot" le plus proche dans un large
-        # cone autour de la derniere direction verrouillee.
+        # LIDAR RELAY: look for the nearest "robot" blob in a wide cone
+        # around the last locked direction.
         self._update_lidar_lock(ranges, msg, idx_of)
 
     def _update_lidar_lock(self, ranges, msg, idx_of):
-        """Detecte le blob (~robot) le plus proche autour de last_target_angle
-        et met a jour lidar_lock_*. Un blob = groupe de points contigus a
-        distance voisine, de largeur physique compatible avec un TurtleBot."""
+        """Detect the nearest blob (~a robot) around last_target_angle and
+        update lidar_lock_*. A blob = a group of contiguous points at similar
+        range, whose physical width is compatible with a TurtleBot."""
         n = len(ranges)
         if not self.lock_active:
             self.lidar_lock_ok = False
@@ -289,11 +290,11 @@ class TrackerNode(Node):
             self.lidar_lock_ok = False
             return
 
-        # point le plus proche du cone = graine du blob
+        # nearest point of the cone = blob seed
         seed = int(np.argmin(np.where(valid_mask, win, 99.0)))
         seed_r = win[seed]
 
-        # etendre a gauche/droite tant que la distance reste proche (meme objet)
+        # grow left/right while the range stays close (same object)
         lo = seed
         while lo - 1 >= 0 and valid_mask[lo - 1] and \
                 abs(win[lo - 1] - win[lo]) < depth:
@@ -303,10 +304,10 @@ class TrackerNode(Node):
                 abs(win[hi + 1] - win[hi]) < depth:
             hi += 1
 
-        span = (hi - lo) * msg.angle_increment            # largeur angulaire
-        width = span * seed_r                             # largeur physique (m)
+        span = (hi - lo) * msg.angle_increment            # angular width
+        width = span * seed_r                             # physical width (m)
         if width > wmax:
-            # trop large pour un robot (mur/meuble) -> pas un blob valide
+            # too wide for a robot (wall/furniture) -> not a valid blob
             self.lidar_lock_ok = False
             return
 
@@ -316,12 +317,12 @@ class TrackerNode(Node):
         self.lidar_lock_dist = float(seed_r)
         self.lidar_lock_ok = True
 
-    # ---------- CONTROLE ----------
+    # ---------- CONTROL ----------
     def control_loop(self):
         t = Twist()
         now = self.get_clock().now()
 
-        # 0) ANTI-BLOCAGE (priorite absolue).
+        # 0) ANTI-STALL (absolute priority).
         if self.escape_until is not None:
             if now < self.escape_until:
                 self.state = "STUCK"
@@ -378,7 +379,7 @@ class TrackerNode(Node):
             self.cmd_pub.publish(t)
             return
 
-        # 1) COULEUR VUE -> suivi visuel (le plus fiable)
+        # 1) COLOUR SEEN -> visual following (the most reliable)
         if self.color_seen:
             self.state = "TRACK"
             self.lost_since = None
@@ -387,21 +388,21 @@ class TrackerNode(Node):
             self.cmd_pub.publish(cmd)
             return
 
-        # 2) COULEUR PERDUE mais VERROU ACTIF : le LIDAR prend le relais.
-        # Tant qu'un blob robot est vu dans le cone, on continue de suivre
-        # sa direction -> la chaine ne se casse pas.
+        # 2) COLOUR LOST but LOCK STILL ACTIVE: the LIDAR takes over. As
+        # long as a robot blob is seen in the cone we keep following its
+        # direction -> the chain does not break.
         if self.lock_active and self.lidar_lock_ok:
             self.lost_since = None
             self.state = "LIDAR"
-            # on realimente la derniere direction connue avec le blob : quand
-            # la couleur reviendra, la camera reprendra proprement le relais.
+            # feed the last known direction from the blob: when the colour
+            # comes back, the camera takes over again cleanly.
             self.last_target_angle = self.lidar_lock_angle
             cmd = self._track_lidar()
             self.cmd_forward = cmd.linear.x > 0.04
             self.cmd_pub.publish(cmd)
             return
 
-        # 3) NI couleur NI blob : on temporise, puis recherche sur place.
+        # 3) NEITHER colour NOR blob: coast for a while, then search in place.
         self.cmd_forward = False
         if self.lost_since is None:
             self.lost_since = now
@@ -411,12 +412,12 @@ class TrackerNode(Node):
             self.state = "COAST"
             self.cmd_pub.publish(self._coast())
         elif elapsed < self.get_parameter("lidar_lost_time").value:
-            # on a perdu le blob a l'instant : on tient la direction sans
-            # foncer, en esperant re-accrocher couleur ou lidar tres vite.
+            # the blob was just lost: hold the direction without rushing,
+            # hoping to re-acquire colour or lidar very quickly.
             self.state = "HOLD"
             self.cmd_pub.publish(self._coast())
         else:
-            self.lock_active = False          # verrou abandonne -> recherche
+            self.lock_active = False          # lock dropped -> search
             self.state = "SEARCH"
             self.cmd_pub.publish(self._search())
 
@@ -435,7 +436,7 @@ class TrackerNode(Node):
             f"odom={self.odom_count}({odom_ok}) vitesse={self.odom_speed:.3f}")
 
     def _bearing_error(self):
-        """Erreur angulaire vs bearing desire (V aplati)."""
+        """Angular error against the desired bearing (flattened V)."""
         des = math.radians(self.get_parameter("desired_bearing").value)
         return self.target_angle - des
 
@@ -448,7 +449,7 @@ class TrackerNode(Node):
         too_close = self.nearest_dist <= self.get_parameter("safety_dist").value + 0.04
         if self.target_distance <= arrive or near_by_area or too_close:
             t.linear.x = 0.0
-            if too_close:               # trop pres : petit recul de securite
+            if too_close:               # too close: small safety back-off
                 t.linear.x = -0.05
         else:
             t.linear.x = self._clamp(self.get_parameter("k_lin").value * e_dist,
@@ -461,10 +462,10 @@ class TrackerNode(Node):
         return t
 
     def _track_lidar(self):
-        """Suivi guide UNIQUEMENT par le lidar (couleur perdue). On vise le
-        blob : on tourne vers son angle et on tient target_distance. Plus
-        prudent que le suivi couleur (vitesse plafonnee), car le lidar est
-        moins discriminant qu'une couleur."""
+        """Following guided ONLY by the lidar (colour lost). We aim at the
+        blob: turn towards its angle and hold target_distance. More cautious
+        than colour following (capped speed), because the lidar discriminates
+        less well than a colour."""
         t = Twist()
         des = self.get_parameter("target_distance").value
         d = self.lidar_lock_dist
@@ -476,7 +477,8 @@ class TrackerNode(Node):
         elif d <= max(des, self.get_parameter("arrive_dist").value):
             t.linear.x = 0.0
         else:
-            # avance plus prudente qu'en couleur (0.7x, plafonnee a v_search*1.5)
+            # more cautious advance than in colour mode (0.7x, capped at
+            # v_search*1.5)
             t.linear.x = self._clamp(
                 0.7 * self.get_parameter("k_lin").value * e_dist,
                 min(self.get_parameter("v_max").value,

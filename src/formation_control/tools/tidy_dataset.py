@@ -1,35 +1,35 @@
 #!/usr/bin/env python3
 """
-tidy_dataset.py — range un dossier dataset en sous-dossiers autonomes PAR SESSION.
+tidy_dataset.py — tidy a dataset folder into self-contained PER-SESSION folders.
 
-Apres `collect`, tout atterrit a plat dans dataset_collected/tortugaX/. Ce script
-range chaque session dans son propre dossier, autonome et supprimable d'un bloc :
+After `collect`, everything lands flat in dataset_collected/tortugaX/. This script
+files each session into its own folder, self-contained and deletable in one go:
 
   tortuga2/
-    tortuga2_20260716_190132/                 <- une session (supprimable d'un coup)
-        tortuga2_20260716_190132_final.mp4    #  video complete
-        frames_total.csv                      #  frames.csv de tous les segments, fusionnes
-        odom_total.csv                        #  odometrie de tous les segments
-        scan_total.csv                        #  lidar de tous les segments
-        raw/                                  #  tout le brut
+    tortuga2_20260716_190132/                 <- one session (delete in one go)
+        tortuga2_20260716_190132_final.mp4    #  full video
+        frames_total.csv                      #  frames.csv of every segment, merged
+        odom_total.csv                        #  odometry of every segment
+        scan_total.csv                        #  lidar of every segment
+        raw/                                  #  all the raw material
             tortuga2_20260716_190132_seg01/   #    images + frames/odom/scan.csv
             tortuga2_20260716_190132_seg01.mp4
             ...
 
-Les *_total.csv concatenent les CSV des segments (dans l'ordre seg01..segNN) avec
-une colonne `segment` en tete pour retrouver le brut. Une session ratee = un seul
-dossier a supprimer.
+The *_total.csv files concatenate the segment CSVs (in seg01..segNN order) with a
+leading `segment` column so the raw data can be traced back. A failed session is a
+single folder to delete.
 
-  ./tidy_dataset.py <dossier> [--dry-run] [--tol SECONDES]
+  ./tidy_dataset.py <folder> [--dry-run] [--tol SECONDS]
 
-- <dossier> : un dossier robot (dataset_collected/tortuga2) OU le parent
-              (dataset_collected) -> chaque tortugaX/ est traite.
-- --dry-run : montre ce qui SERAIT fait, sans rien deplacer ni ecrire.
-- --tol N   : tolerance (s) pour ranger un ancien rosbag pres de sa session
-              (defaut 300). Les rosbags vont dans raw/ (plus enregistres).
+- <folder>  : a robot folder (dataset_collected/tortuga2) OR its parent
+              (dataset_collected) -> every tortugaX/ is processed.
+- --dry-run : show what WOULD be done, without moving or writing anything.
+- --tol N   : tolerance (s) for filing an old rosbag next to its session
+              (default 300). Rosbags go into raw/ (they are no longer recorded).
 
-Sur : deplace seulement (jamais de suppression), saute les destinations
-existantes, idempotent (relancable sans risque).
+Safe: it only moves files (never deletes), skips existing destinations, and is
+idempotent (can be re-run without risk).
 """
 
 import csv
@@ -43,8 +43,8 @@ TS = r'(\d{8}_\d{6})'
 ROBOT = r'(tortuga\d+)'
 
 RE_ROBOT_DIR = re.compile(r'^tortuga\d+$')
-RE_SESSION_DIR = re.compile(rf'^{ROBOT}_{TS}$')            # conteneur de session
-RE_SEG = re.compile(rf'^{ROBOT}_{TS}_seg\d+(?:\..+)?$')    # dossier OU fichier
+RE_SESSION_DIR = re.compile(rf'^{ROBOT}_{TS}$')            # session container
+RE_SEG = re.compile(rf'^{ROBOT}_{TS}_seg\d+(?:\..+)?$')    # folder OR file
 RE_FINAL = re.compile(rf'^{ROBOT}_{TS}_final\.mp4$')
 RE_BAGDIR = re.compile(rf'^bag_{TS}_{ROBOT}$')
 RE_BAGFILE = re.compile(rf'^bag_{TS}_{ROBOT}_.+$')
@@ -72,10 +72,10 @@ def _sdir(robot_dir, robot, sess):
 
 
 def _read_csv_rows(path):
-    """Lit un CSV en TOLERANT les fichiers abimes : octets NUL (recorder tue en
-    pleine ecriture) retires, decodage permissif. Renvoie (header, rows) ; header
-    None si vide. Une ligne corrompue arrete la lecture de CE fichier sans casser
-    le reste."""
+    """Read a CSV TOLERATING damaged files: NUL bytes (recorder killed mid-write)
+    are stripped and decoding is permissive. Returns (header, rows); header is
+    None when empty. A corrupt line stops the reading of THIS file without
+    breaking the rest."""
     with open(path, newline='', encoding='utf-8', errors='replace') as fh:
         rd = csv.reader(line.replace('\x00', '') for line in fh)
         header = next(rd, None)
@@ -93,9 +93,9 @@ def _read_csv_rows(path):
 
 
 def build_totals(session_dir):
-    """Concatene raw/*_segNN/<kind>.csv -> <kind>_total.csv (ajoute une colonne
-    `segment`). Renvoie la liste des totaux ecrits ; previent si un flux est vide
-    (ex. odom.csv a 0 octet = pas d'odometrie enregistree)."""
+    """Concatenate raw/*_segNN/<kind>.csv -> <kind>_total.csv (adds a `segment`
+    column). Returns the list of totals written; warns when a stream is empty
+    (e.g. a 0-byte odom.csv = no odometry was recorded)."""
     raw = os.path.join(session_dir, 'raw')
     if not os.path.isdir(raw):
         return []
@@ -135,7 +135,7 @@ def tidy(robot_dir, dry_run=False, tol_s=300):
         return
     top = sorted(os.listdir(robot_dir))
 
-    # Sessions connues : depuis les segments/finaux ET les conteneurs existants.
+    # Known sessions: from the segments/finals AND the existing containers.
     sessions = {}
     for name in top:
         m = RE_SEG.match(name) or RE_FINAL.match(name) or RE_SESSION_DIR.match(name)
@@ -152,7 +152,7 @@ def tidy(robot_dir, dry_run=False, tol_s=300):
             ops.append((src, dest))
         touched[(robot, sess)] = sd
 
-    # 1) Elements a plat au niveau du robot.
+    # 1) Flat items at the robot level.
     for name in top:
         if RE_SESSION_DIR.match(name):
             continue
@@ -169,8 +169,8 @@ def tidy(robot_dir, dry_run=False, tol_s=300):
             sessions.setdefault(sess, robot)
             place(name, src, robot, sess, 'raw')
 
-    # 2) Conteneurs de session deja existants : on normalise leur contenu
-    #    (tout ce qui n'est pas le _final.mp4 ni raw/ part dans raw/).
+    # 2) Session containers that already exist: normalise their content
+    #    (anything that is neither the _final.mp4 nor raw/ goes into raw/).
     for name in top:
         md = RE_SESSION_DIR.match(name)
         if not md:
@@ -188,7 +188,7 @@ def tidy(robot_dir, dry_run=False, tol_s=300):
             if os.path.abspath(isrc) != os.path.abspath(dest):
                 ops.append((isrc, dest))
 
-    # 3) Execution des deplacements.
+    # 3) Perform the moves.
     moved = skipped = 0
     for src, dest in ops:
         rel = os.path.relpath(dest, robot_dir)
@@ -205,7 +205,7 @@ def tidy(robot_dir, dry_run=False, tol_s=300):
         print(f"  {os.path.basename(src)}  ->  {rel}")
         moved += 1
 
-    # 4) (Re)construction des *_total.csv pour chaque session touchee.
+    # 4) (Re)build the *_total.csv files for each session touched.
     if dry_run:
         for (robot, sess) in sorted(touched):
             print(f"  [dry-run] {robot}_{sess} : construirait frames/odom/scan_total.csv")

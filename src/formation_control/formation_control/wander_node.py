@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-wander_node.py — errance aleatoire au lidar seul (pour la collecte dataset).
+wander_node.py — random wandering on the lidar alone (for dataset collection).
 
-Le robot avance, change de cap aleatoirement, et evite tout obstacle
-(murs, meubles, AUTRES ROBOTS) uniquement au lidar. La camera reste
-entierement libre pour l'enregistrement.
+The robot drives forward, changes heading at random, and avoids every obstacle
+(walls, furniture, OTHER ROBOTS) using the lidar only. The camera is left
+entirely free for recording.
 
-Etats : FORWARD -> (obstacle) TURN -> FORWARD ; BACKUP si trop proche.
+States: FORWARD -> (obstacle) TURN -> FORWARD; BACKUP when too close.
 """
 
 import math
@@ -25,38 +25,38 @@ class WanderNode(Node):
         self.declare_parameter("v_forward", 0.12)
         self.declare_parameter("w_turn", 0.8)
         self.declare_parameter("critical_dist", 0.22)
-        self.declare_parameter("obstacle_dist", 0.50)   # seuil d'arret devant obstacle
-        self.declare_parameter("safety_dist", 0.26)     # recul UNIQUEMENT si plus
-        #   le lidar voit le point le plus proche de l'AUTRE robot, mais MON
-        #   chassis depasse devant mon lidar ET le sien depasse aussi -> a 0.16 m
-        #   lidar, les carrosseries se touchent presque. Deux corps de ~16 cm +
-        #   robots en mouvement (vitesse de rapprochement) -> on garde 0.32 m
-        #   mini au lidar. On ne descend jamais sous cette limite.
-        self.declare_parameter("pause_time", 1.0)       # 1 s d'arret : "attends,
-        #   ca bouge ?" ; si oui on repart, si non on change de direction.
-        self.declare_parameter("front_deg", 25.0)       # demi-secteur frontal etroit
-        self.declare_parameter("avoid_deg", 45.0)       # demi-cone LARGE (body-aware)
-        #   Le robot est un cube 16x16 cm (demi-diagonale ~0.11 m). En rotation,
-        #   ses COINS balaient un cercle : on exige donc que tout un cone large
-        #   soit degage avant de repartir, sinon le coin accroche l'obstacle.
-        self.declare_parameter("robot_radius", 0.12)    # BULLE = cercle CIRCONSCRIT
-        #   du carre 16x16 cm : rayon = demi-diagonale ~0.113 m (+ petite marge).
-        #   C'est ce rayon qui couvre les COINS ; un cercle de 8 cm raterait les
-        #   coins et laisserait les carrosseries se toucher. Sert de plancher
-        #   d'evitement OMNIDIRECTIONNEL (cone avant large + secteurs lateraux).
-        # --- Errance continue (meandre) : au lieu d'un seul a-coup toutes les
-        # 5 s, on applique une vitesse de rotation aleatoire QUI DURE et se
-        # renouvelle souvent -> trajectoire sinueuse, exploration reguliere.
-        self.declare_parameter("wander_w_max", 0.35)    # amplitude du meandre (doux)
-        self.declare_parameter("wander_min_s", 3.5)     # cap tenu longtemps
-        self.declare_parameter("wander_max_s", 7.0)     # -> balade fluide
-        #   Caps tenus plus longtemps -> le robot avance plus longtemps dans une
-        #   meme direction (marche plus droite, moins de changements de cap).
+        self.declare_parameter("obstacle_dist", 0.50)   # stop threshold ahead
+        self.declare_parameter("safety_dist", 0.26)     # back off ONLY if closer
+        #   the lidar sees the nearest point of the OTHER robot, but MY chassis
+        #   sticks out in front of my lidar AND so does its own -> at 0.16 m of
+        #   lidar range the two bodies are nearly touching. Two ~16 cm bodies +
+        #   robots in motion (closing speed) -> we keep a 0.32 m lidar minimum.
+        #   We never go below that limit.
+        self.declare_parameter("pause_time", 1.0)       # 1 s stop: "wait, is it
+        #   moving?"; if so we resume, otherwise we change direction.
+        self.declare_parameter("front_deg", 25.0)       # narrow front half-sector
+        self.declare_parameter("avoid_deg", 45.0)       # WIDE half-cone (body-aware)
+        #   The robot is a 16x16 cm cube (half-diagonal ~0.11 m). While turning,
+        #   its CORNERS sweep a circle: we therefore require a whole wide cone to
+        #   be clear before resuming, otherwise a corner catches the obstacle.
+        self.declare_parameter("robot_radius", 0.12)    # BUBBLE = CIRCUMSCRIBED
+        #   circle of the 16x16 cm square: radius = half-diagonal ~0.113 m (plus
+        #   a small margin). This radius is what covers the CORNERS; an 8 cm
+        #   circle would miss them and let the bodies touch. It acts as the
+        #   OMNIDIRECTIONAL avoidance floor (wide front cone + side sectors).
+        # --- Continuous wandering (meander): instead of a single jerk every 5 s,
+        # we apply a random angular velocity THAT LASTS and is renewed often ->
+        # a winding trajectory, steady exploration.
+        self.declare_parameter("wander_w_max", 0.35)    # meander amplitude (gentle)
+        self.declare_parameter("wander_min_s", 3.5)     # heading held for a while
+        self.declare_parameter("wander_max_s", 7.0)     # -> smooth stroll
+        #   Headings held longer -> the robot drives longer in the same direction
+        #   (straighter path, fewer heading changes).
 
         self.scan = None
         self.state = "FORWARD"
         self.odom_speed = 0.0
-        # Compteurs de messages : diagnostic terminal (voir debug_log).
+        # Message counters: terminal diagnostics (see debug_log).
         self.scan_count = 0
         self.odom_count = 0
         self.d_front = 99.0
@@ -65,15 +65,15 @@ class WanderNode(Node):
         self.d_right = 99.0
         self.stuck_since = None
         self.escape_until = None
-        self.pause_since = None      # debut de la pause "attends que ca degage"
+        self.pause_since = None      # start of the "wait until it clears" pause
         self.turn_dir = 1.0
-        self.avoid_dir = 0.0         # sens de contournement verrouille (0 = libre)
-        self.wander_w = 0.0          # rotation aleatoire courante (meandre)
+        self.avoid_dir = 0.0         # locked go-around direction (0 = free)
+        self.wander_w = 0.0          # current random rotation (meander)
         self.next_wander = self.get_clock().now()
 
         self.cmd_pub = self.create_publisher(Twist, "cmd_vel", 10)
-        # QoS capteurs (BEST_EFFORT) : indispensable pour le lidar Gazebo,
-        # sinon aucun scan recu et le robot reste immobile.
+        # Sensor QoS (BEST_EFFORT): mandatory for the Gazebo lidar, otherwise
+        # no scan is received and the robot stays still.
         self.create_subscription(LaserScan, "scan", self.scan_cb, qos_profile_sensor_data)
         self.create_subscription(Odometry, "odom", self.odom_cb, qos_profile_sensor_data)
         self.create_timer(0.1, self.loop)
@@ -90,8 +90,8 @@ class WanderNode(Node):
         self.odom_speed = math.sqrt(v.x*v.x + v.y*v.y)
 
     def debug_log(self):
-        # Etat lisible au terminal. Si scan reste a 0 -> capteur muet ou
-        # mismatch QoS (le nœud attend le scan et ne bouge pas).
+        # Human-readable state in the terminal. If scan stays at 0 -> silent
+        # sensor or QoS mismatch (the node waits for the scan and never moves).
         scan_ok = "OK" if self.scan_count else "!! AUCUN (QoS/topic ?)"
         odom_ok = "OK" if self.odom_count else "!! AUCUN (QoS/topic ?)"
         self.get_logger().info(
@@ -101,9 +101,9 @@ class WanderNode(Node):
             f"d_left={self.d_left:.2f} d_right={self.d_right:.2f}")
 
     def sector_min(self, msg, center_rad, half_rad):
-        # Gere les lidars en [0, 2pi] : angle normalise + fenetre circulaire.
-        # Garde-fou : scan vide ou sans pas angulaire (angle_increment=0) ->
-        # division par zero -> on renvoie "rien vu" plutot que de crasher.
+        # Handles [0, 2pi] lidars: normalised angle + circular window.
+        # Guard: an empty scan or one without angular step (angle_increment=0)
+        # -> division by zero -> return "nothing seen" rather than crashing.
         if len(msg.ranges) == 0 or msg.angle_increment == 0.0:
             return 99.0
         ranges = np.array(msg.ranges)
@@ -131,7 +131,7 @@ class WanderNode(Node):
         front_half = math.radians(self.get_parameter("front_deg").value)
         avoid_half = math.radians(self.get_parameter("avoid_deg").value)
         d_front = self.sector_min(self.scan, 0.0, front_half)
-        d_wide = self.sector_min(self.scan, 0.0, avoid_half)   # cone LARGE body-aware
+        d_wide = self.sector_min(self.scan, 0.0, avoid_half)   # WIDE body-aware cone
         d_left = self.sector_min(self.scan, math.radians(45), math.radians(30))
         d_right = self.sector_min(self.scan, math.radians(-45), math.radians(30))
         self.d_front, self.d_wide = d_front, d_wide
@@ -144,8 +144,8 @@ class WanderNode(Node):
         radius = self.get_parameter("robot_radius").value
         now = self.get_clock().now()
 
-        # ANTI-BLOCAGE : commande d'avancer mais odometrie immobile
-        # (pied de table invisible au lidar...) -> recul + rotation 1.5 s.
+        # ANTI-STALL: we command forward motion but the odometry stays still
+        # (a table leg invisible to the lidar...) -> back off + turn for 1.5 s.
         if self.escape_until is not None:
             if now < self.escape_until:
                 t.linear.x = -0.08
@@ -169,16 +169,16 @@ class WanderNode(Node):
         safety = self.get_parameter("safety_dist").value
         pause_t = self.get_parameter("pause_time").value
 
-        # --- EVITEMENT body-aware (BULLE) en 2 temps ---
-        # Le robot est un CARRE 16x16 cm : sa bulle est le cercle CIRCONSCRIT
-        # (rayon = robot_radius ~0.113 m). On surveille TOUT l'avant (cone large
-        # ±avoid_deg) ET les secteurs lateraux, pas seulement l'etroit cone frontal
-        # ±front_deg : un robot arrivant DE BIAIS etait invisible a d_front et se
-        # faisait accrocher au coin (d'ou "il tourne, ravance et se recogne").
-        #   breach = un obstacle entre dans la bulle (rayon + petite marge) dans
-        #            N'IMPORTE quelle direction avant/laterale -> danger immediat.
-        # 1) obstacle -> ARRET NET 1 s. 2) toujours la -> ROTATION PURE jusqu'a ce
-        #    que la bulle soit reellement degagee, puis nouveau cap.
+        # --- body-aware avoidance (BUBBLE), in two stages ---
+        # The robot is a 16x16 cm SQUARE: its bubble is the CIRCUMSCRIBED circle
+        # (radius = robot_radius ~0.113 m). We watch the WHOLE front (wide cone
+        # ±avoid_deg) AND the side sectors, not just the narrow ±front_deg front
+        # cone: a robot arriving AT AN ANGLE was invisible to d_front and got
+        # caught on a corner (hence "it turns, drives on and bumps again").
+        #   breach = an obstacle enters the bubble (radius + small margin) from
+        #            ANY front/side direction -> immediate danger.
+        # 1) obstacle -> HARD STOP for 1 s. 2) still there -> PURE ROTATION until
+        #    the bubble is genuinely clear, then a new heading.
         breach = min(d_front, d_wide, d_left, d_right) < radius + 0.05
         blocked = (d_wide < obst) or breach
         if blocked:
@@ -186,40 +186,40 @@ class WanderNode(Node):
                 self.pause_since = now
                 self.avoid_dir = 1.0 if d_left > d_right else -1.0  # choisi 1 fois
             waited = (now - self.pause_since).nanoseconds / 1e9
-            too_close = (d_wide < safety) or breach     # bulle percee -> reculer
+            too_close = (d_wide < safety) or breach     # bubble pierced -> back off
 
             if waited < pause_t:
-                # temps 1 : arret complet, on observe (espoir que ca degage)
+                # stage 1: full stop, we observe (hoping it clears)
                 self.state = "PAUSE"
                 if too_close:
                     t.linear.x = -0.06
                 self.cmd_pub.publish(t)
                 return
 
-            # temps 2 : contournement par ROTATION PURE (marche arriere seulement
-            # si la bulle est percee), sens verrouille -> trajectoire propre.
+            # stage 2: go around by PURE ROTATION (reverse only if the bubble
+            # is pierced), direction locked -> a clean trajectory.
             self.state = "REROUTE"
             t.angular.z = w * self.avoid_dir
-            if too_close:                       # danger : on degage en reculant
+            if too_close:                       # danger: back off to clear
                 t.linear.x = -0.05
-            # on ne repart que quand le cone large ET la bulle sont degages (evite
-            # de repartir alors que l'autre robot est encore sur le flanc-avant).
+            # only resume once the wide cone AND the bubble are clear (avoids
+            # setting off while the other robot is still on the front flank).
             if d_wide > obst * 1.25 and not breach:
                 self.pause_since = None
                 self.avoid_dir = 0.0
-                self.next_wander = now          # tire un nouveau cap tout de suite
+                self.next_wander = now          # draw a new heading right away
                 self.state = "FORWARD"
             self.cmd_pub.publish(t)
             return
         else:
-            # voie libre : on annule pause et verrou de contournement
+            # clear path: cancel the pause and the go-around lock
             self.pause_since = None
             self.avoid_dir = 0.0
 
-        # --- FORWARD + ERRANCE CONTINUE (meandre) ---
-        # Rotation aleatoire QUI DURE (renouvelee toutes les 1-2.5 s) : le
-        # robot serpente au lieu d'aller tout droit. On ralentit un peu si un
-        # obstacle apparait dans le cone large, pour anticiper le virage.
+        # --- FORWARD + CONTINUOUS WANDERING (meander) ---
+        # A random rotation THAT LASTS (renewed every 1-2.5 s): the robot
+        # snakes instead of going straight. We slow down slightly when an
+        # obstacle appears in the wide cone, to anticipate the turn.
         self.state = "FORWARD"
         if now >= self.next_wander:
             wmax = self.get_parameter("wander_w_max").value
@@ -227,7 +227,7 @@ class WanderNode(Node):
             self.next_wander = now + rclpy.duration.Duration(
                 seconds=random.uniform(self.get_parameter("wander_min_s").value,
                                        self.get_parameter("wander_max_s").value))
-        t.linear.x = v * (0.8 if d_wide < obst else 1.0)   # plein regime sauf pres
+        t.linear.x = v * (0.8 if d_wide < obst else 1.0)   # full speed unless close
         t.angular.z = self.wander_w
         self.cmd_pub.publish(t)
 

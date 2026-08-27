@@ -49,10 +49,10 @@ FORMATION_BEARINGS = {
     "column": [0, 0, 0], "line": [30, -30, 30],
     "triangle": [25, -25, 0], "square": [20, -20, 0],
 }
-TARGET_DISTANCE = 0.32          # defaut cascade colonne : 32 cm
-# Distance de suivi PAR ROBOT (m). Chaque suiveur peut avoir sa propre
-# distance ; a defaut on retombe sur TARGET_DISTANCE (0.32). Reglable aussi
-# a chaud sans relancer :
+TARGET_DISTANCE = 0.32          # default for the column cascade: 32 cm
+# PER-ROBOT following distance (m). Each follower may have its own distance;
+# by default we fall back to TARGET_DISTANCE (0.32). Also tunable at runtime
+# without restarting:
 #   ros2 param set /tortugaX/tracker target_distance 0.40
 FOLLOW_DIST = {1: 0.32, 2: 0.32, 3: 0.32, 4: 0.32}
 SAFETY = 0.16
@@ -435,23 +435,23 @@ def bringup_start():
                f"-r ~/image_raw:=camera/image_raw")
     log("Bringup + camera started: " + ", ".join(f"t{i}" for i in present)
         + " (~15 s to boot).", "ok")
-    # Le fps fixe au LANCEMENT ne "prend" pas (l'auto-expo reprend la main ->
-    # ~18 fps). On verrouille donc le fps A CHAUD, en local sur chaque robot,
-    # une fois la camera demarree (~15 s). C'est ce qui donne les ~50 fps.
+    # An fps set at LAUNCH time does not "stick" (auto-exposure takes over ->
+    # ~18 fps). So we lock the fps AT RUNTIME, locally on each robot, once the
+    # camera has booted (~15 s). That is what gives the ~50 fps.
     def _auto_lock():
         time.sleep(16)
         lock_camera_fps(present, announce=True)
     threading.Thread(target=_auto_lock, daemon=True).start()
 
 
-# Chemin du tool camera_fps.py sur les robots (deploye avec le package).
+# Path to the camera_fps.py tool on the robots (deployed with the package).
 CAMERA_FPS_TOOL = "~/formation_ws/src/formation_control/tools/camera_fps.py"
 
 
 def lock_camera_fps(indices=None, announce=True):
-    """Verrouille le fps camera A CHAUD (lock=True) sur chaque robot, en LOCAL
-    (via SSH) -> le reglage s'impose la ou le param de lancement echoue.
-    Optionnellement remonte AnalogueGain pour compenser la pose plus courte."""
+    """Lock the camera fps AT RUNTIME (lock=True) on each robot, LOCALLY (over
+    SSH) -> the setting takes effect where the launch parameter fails.
+    Optionally raises AnalogueGain to compensate for the shorter exposure."""
     idx = indices if indices is not None else present_indices()
     if not idx:
         log("Select at least one robot.", "warn")
@@ -537,18 +537,19 @@ def behavior_start():
                              f"-p hsv_high:=[{hi[0]},{hi[1]},{hi[2]}]")
                 else:
                     cspec = f"-p target_color:={color}"
-                # Lancement DETACHE (nohup + &) avec log sur le robot, comme
-                # dataset_tools.sh. Sinon le ros2 run tourne en foreground de
-                # la session SSH : si la connexion se ferme/hoquete (WiFi), le
-                # tracker recoit SIGHUP et MEURT -> robot fige, sans trace.
-                # Le log ~/tracker_tortugaX.log permet de diagnostiquer.
+                # DETACHED launch (nohup + &) with a log on the robot, like
+                # dataset_tools.sh. Otherwise ros2 run stays in the foreground
+                # of the SSH session: if the connection drops or hiccups (WiFi)
+                # the tracker gets SIGHUP and DIES -> a frozen robot, no trace.
+                # The ~/tracker_tortugaX.log log makes diagnosis possible.
                 tracker_cmd = (
                     f"ros2 run formation_control tracker "
                     f"--ros-args -r __ns:=/tortuga{rob} "
-                    # float() OBLIGATOIRE : les bearings sont des int (0, 30…)
-                    # mais le param est declare en DOUBLE cote tracker -> ROS2
-                    # rejette un int et le nœud CRASHE au demarrage. On envoie
-                    # donc '0.0' et non '0'. Idem target_distance (deja float).
+                    # float() is MANDATORY: bearings are ints (0, 30…) but the
+                    # parameter is declared as a DOUBLE on the tracker side ->
+                    # ROS 2 rejects an int and the node CRASHES at startup. So
+                    # we send '0.0', not '0'. Same for target_distance (already
+                    # a float).
                     f"{cspec} -p desired_bearing:={float(bear)} "
                     f"-p target_distance:={float(FOLLOW_DIST.get(rob, TARGET_DISTANCE))}")
                 ssh_bg(rob, robot_env() +
@@ -1107,8 +1108,8 @@ tk.Button(r1, text="Stop", command=bringup_stop,
           bg=C_PANE, fg=C_SUB, bd=0, font=(FONT, 9), cursor="hand2",
           activebackground=C_PANE2, padx=14).pack(side="left")
 
-# Verrouillage fps camera (applique auto ~16 s apres bringup, ou a la demande).
-# Le fps fixe au lancement ne tient pas -> on l'impose a chaud, en local.
+# Camera fps lock (applied automatically ~16 s after bringup, or on demand).
+# An fps set at launch does not hold -> we force it at runtime, locally.
 cam_fps_var = tk.StringVar(value="55")
 cam_gain_var = tk.StringVar(value="8")
 r1b = tk.Frame(body, bg=C_BG)
