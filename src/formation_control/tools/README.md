@@ -37,8 +37,15 @@ The main console. Two layers, matching the launch design: start the **bringup**
 python3 launcher_gui.py
 ```
 
+Left panel, in order: **ROBOTS** (selection + battery), **1 · BUILD**
+(*Build + Deploy*), **2 · HARDWARE** (*Start robot*, *Lock FPS*), **3 · MODE**
+(*Wander* / *Cascade* / *Dataset*, with the formation dropdown and *Apply live*).
+Per-robot **ZQSD** and **Halt** buttons, plus a **STOP — kill everything**.
+
 Inspection tabs: **Log**, **Camera** (raw / colour detection / mask),
-**Lidar** (points / sectors / accumulated map), **Topics**, **Dataset**.
+**Lidar** (points / sectors / accumulated map), **Topics**, **Formation**
+(per-robot colour and distance, *HSV Tuner…*, *Save chain*) and **Dataset**
+(*Pull data*, *Delete*).
 
 Worth knowing:
 

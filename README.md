@@ -54,23 +54,18 @@ Each directory has its own README with the details:
 - [`src/formation_control/scripts/`](src/formation_control/scripts/README.md) — `ttb.sh`
 - [`src/formation_control/tools/`](src/formation_control/tools/README.md) — GUI, calibration, dataset pipeline
 
-## Build
-
-On the PC (and on each robot, where `deploy_build.sh` does it for you):
+## First-time setup (PC only, once)
 
 ```bash
+sudo apt install sshpass rsync tmux ffmpeg python3-tk
 mkdir -p ~/formation_ws/src
 # place this repository's src/formation_control in ~/formation_ws/src/
 cd ~/formation_ws
 colcon build --symlink-install
-source install/setup.bash
 ```
 
-PC-side prerequisites for the fleet scripts:
-
-```bash
-sudo apt install sshpass rsync tmux ffmpeg
-```
+That is the only build you do by hand. **The robots are built from the GUI** —
+its *Build + Deploy* button copies the package to each one and compiles it there.
 
 ## The three modes
 
@@ -99,37 +94,62 @@ carrying both a wall-clock timestamp and the ROS stamp, so the streams are
 directly alignable. It has a disk floor: it pauses below `min_free_mb` and
 resumes once space is freed, so a Pi can never fill its card.
 
-## Quick start
+## How to start?
 
-**Fleet from the terminal** — see [`scripts/README.md`](src/formation_control/scripts/README.md):
-
-```bash
-cd src/formation_control/scripts
-./ttb.sh deploy 4               # copy + build on the robots (after every change)
-./ttb.sh start 4 triangle       # bringup + followers
-./ttb.sh teleop                 # drive tortuga1; the others follow
-./ttb.sh formation 4 carre      # change formation without restarting
-./ttb.sh stop 4
-```
-
-**Fleet from the GUI** — see [`tools/README.md`](src/formation_control/tools/README.md):
+Open a terminal and run:
 
 ```bash
-python3 src/formation_control/tools/launcher_gui.py
+export DISPLAY=:0; export WAYLAND_DISPLAY=wayland-0; export ROS_DOMAIN_ID=30; source /opt/ros/humble/setup.bash; source ~/formation_ws/install/setup.bash; python3 ~/formation_ws/src/formation_control/tools/launcher_gui.py
 ```
 
-Two layers: start the bringup (motors + lidar + camera), then a mode on top of
-it. Tabs for Log, Camera, Lidar, Topics and Dataset.
+That is the whole entry point. **Everything is driven from the GUI** — deploying
+to the robots, starting them, switching mode, driving the leader, recording and
+collecting a dataset. There is nothing else to type in the terminal.
 
-**A dataset session** — see [`tools/README.md`](src/formation_control/tools/README.md):
+What the line does, in order: point the GUI at the display (`DISPLAY` /
+`WAYLAND_DISPLAY`, needed under WSLg), join the fleet's DDS domain
+(`ROS_DOMAIN_ID=30`), source ROS 2 and the workspace, then launch the console.
 
-```bash
-cd src/formation_control/tools
-./dataset_tools.sh start 1 2 3 4     # wander + record
-./dataset_tools.sh drain 2 3         # optional: pull + purge while recording
-./dataset_tools.sh stop              # clean stop, recorder first
-./dataset_tools.sh collect 1 2 3 4   # pull, assemble videos, tidy per session
-```
+### Once the window is open
+
+The left panel walks you through it, top to bottom:
+
+**ROBOTS** — tick the robots you want to use. Battery level is shown next to
+each one.
+
+**1 · BUILD** — *Build + Deploy* copies the package onto the ticked robots and
+builds it there. Needed the first time, and after every code change.
+
+**2 · HARDWARE** — *Start robot* brings up motors, lidar and camera. Give it
+~15 s; the camera fps re-locks itself just after (*Lock FPS* forces it by hand).
+Leave this running — it is the layer everything else sits on.
+
+**3 · MODE** — pick one, then *Start*:
+
+- **Wander** — autonomous exploration, lidar-only avoidance.
+- **Cascade** — driven leader + colour followers. Pick a formation
+  (`column`, `line`, `triangle`, `square`) in the dropdown; *Apply live* changes
+  it without restarting anything.
+- **Dataset** — wander + video and lidar recording.
+
+*Stop mode* stops the behaviour without touching the hardware layer, so you can
+switch mode freely. Each robot row also has **ZQSD** to drive it from the
+keyboard and **Halt** to stop it. **STOP — kill everything** is the panic button.
+
+**Inspection tabs**, on the right: **Log**, **Camera** (raw / colour detection /
+mask), **Lidar** (points / sectors / accumulated map), **Topics**,
+**Formation** (per-robot colour and distance, plus *HSV Tuner…* for calibration),
+and **Dataset** (*Pull data* to fetch a session, *Delete* to free the robots'
+cards).
+
+See [`tools/README.md`](src/formation_control/tools/README.md) for the details of
+each panel.
+
+> The terminal scripts (`ttb.sh`, `dataset_tools.sh`, …) still exist and do the
+> same work — they are documented in
+> [`scripts/README.md`](src/formation_control/scripts/README.md) and
+> [`tools/README.md`](src/formation_control/tools/README.md) — but the GUI is the
+> intended way in.
 
 ## Notes
 
