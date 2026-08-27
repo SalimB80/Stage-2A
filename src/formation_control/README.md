@@ -1,122 +1,210 @@
 # formation_control
 
-Leader-follower de formations pour une flotte de TurtleBot3 Burger (ROS 2).
+ROS 2 (Humble) package for a fleet of TurtleBot3 Burger robots: formation
+following, colour-cascade following, lidar-only wandering, and synchronised
+dataset capture. The fleet adapts to 2, 3 or 4 robots.
 
-Le robot **leader** (tortuga1) porte un **casque rectangulaire cyan**. Les
-**followers** (tortuga2..4) le detectent a la camera (bearing) et fusionnent
-avec le lidar (distance) pour maintenir un offset (range, bearing) propre a
-chaque formation. Le systeme s'adapte automatiquement a 2, 3 ou 4 robots.
-
-## Materiel / contexte
-
-- 4x TurtleBot3 Burger : `tortugaX@192.168.0.20X` (X = 1..4), mdp `1234`
-- Lidar + camera sur chaque robot
-- PC sous Windows + WSL, `ROS_DOMAIN_ID=30`
-
-## Arborescence
+## Contents
 
 ```
 formation_control/
-  formation_control/      # code Python (noeud follower, vision, formations)
-  launch/                 # leader.launch.py, follower.launch.py
-  config/                 # parametres + profil DDS unicast
-  tools/                  # GUI Tkinter + calibration HSV
-  scripts/ttb.sh          # script unique de controle de la flotte
+  formation_control/      ROS 2 nodes: tracker, wander, recorder, teleop, follower
+  launch/                 launch files, two-layer bringup + behaviour
+  config/                 follower parameters + Fast DDS unicast profile
+  tools/                  PC-side tooling: GUI, calibration, dataset pipeline
+  scripts/ttb.sh          single-command fleet control over SSH
+  package.xml, setup.py   ament_python package definition
 ```
 
-## Installation (PC WSL)
+Each directory has its own README:
+[nodes](formation_control/README.md) ·
+[launch](launch/README.md) ·
+[config](config/README.md) ·
+[tools](tools/README.md) ·
+[scripts](scripts/README.md)
+
+## Hardware and context
+
+- 4x TurtleBot3 Burger: `tortugaX@192.168.0.20X` (X = 1..4), password `1234`
+- Lidar + Raspberry Pi camera on each robot
+- Control PC on Windows + WSL, `ROS_DOMAIN_ID=30`
+
+## Installation (WSL PC)
 
 ```bash
-sudo apt install sshpass rsync tmux
+sudo apt install sshpass rsync tmux ffmpeg
 mkdir -p ~/formation_ws/src
-# placer ce dossier dans ~/formation_ws/src/formation_control
+# place this folder in ~/formation_ws/src/formation_control
 cd ~/formation_ws
 colcon build --symlink-install
 source install/setup.bash
 chmod +x src/formation_control/scripts/ttb.sh
 ```
 
-## Reseau WSL
+## WSL networking
 
-WSL2 est derriere un NAT : active le mode mirrored dans `C:\Users\<toi>\.wslconfig` :
+WSL2 sits behind a NAT. Enable mirrored mode in `C:\Users\<you>\.wslconfig`:
 
 ```ini
 [wsl2]
 networkingMode=mirrored
 ```
 
-Puis `wsl --shutdown` (PowerShell admin) et relance WSL. Verifie `ping 192.168.0.201`.
+Then `wsl --shutdown` (admin PowerShell) and restart WSL. Check with
+`ping 192.168.0.201`.
 
-Si le multicast DDS ne passe pas, source le profil unicast partout :
+If DDS multicast still does not get through, source the unicast profile
+everywhere — on the PC *and* on every robot:
 
 ```bash
 export FASTRTPS_DEFAULT_PROFILES_FILE=~/formation_ws/src/formation_control/config/fastdds_unicast.xml
 ```
 
-## Le script ttb.sh
+See [`config/README.md`](config/README.md).
 
-Une seule commande pour tout. `N` = nombre de robots (defaut 4).
+## Two following implementations
+
+The package holds two independent following paths. They share no code and are
+started differently.
+
+**Colour cascade — `tracker_node.py` (current).** Every robot wears a different
+helmet colour and follows the one ahead of it: tortuga1 yellow (driven by hand),
+tortuga2 red follows yellow, tortuga3 green follows red, tortuga4 blue follows
+green. Colour identifies *who* to follow and gives the direction; the moment a
+helmet is seen a lock is armed, and if the colour drops out the **lidar takes
+over**, tracking the nearest robot-sized blob around the last known direction.
+The chain survives a blink of the vision instead of breaking. Started by the GUI
+or by `robot_behavior.launch.py mode:=cascade`.
+
+**Single cyan helmet — `follower_node.py` (original).** One leader wearing a cyan
+helmet; followers hold a per-formation (range, bearing) offset, bearing from the
+camera and range fused from the lidar. Started by `ttb.sh start` and
+`follower.launch.py`.
+
+If you are changing following behaviour today, `tracker_node.py` is the file you
+want. Details in [`formation_control/README.md`](formation_control/README.md).
+
+## Fleet control: `ttb.sh`
+
+One command for everything. `N` is the number of robots (default 4).
 
 ```bash
-./ttb.sh deploy  [N]              # copie + build le package sur N robots
-./ttb.sh start   [N] [formation]  # lance bringup + followers (arriere-plan)
-./ttb.sh teleop                   # pilote le leader au clavier
-./ttb.sh formation [N] [form]     # change la formation a chaud
-./ttb.sh monitor [N]              # grille tmux des logs des robots
-./ttb.sh stop    [N]              # arrete tous les noeuds
+./ttb.sh deploy  [N]              # copy the package onto N robots
+./ttb.sh start   [N] [formation]  # bringup + followers (background)
+./ttb.sh teleop                   # drive the leader from the keyboard
+./ttb.sh formation [N] [form]     # change formation at runtime
+./ttb.sh monitor [N]              # tmux grid of the robot logs
+./ttb.sh stop    [N]              # stop every node
 ```
 
-### Workflow typique
+### Typical workflow
 
 ```bash
-./ttb.sh deploy 4               # une fois (et apres chaque modif du code)
-./ttb.sh start 4 triangle       # demarre la flotte
-./ttb.sh teleop                 # pilote tortuga1 ; les autres suivent
-./ttb.sh formation 4 carre      # change de formation sans tout relancer
-./ttb.sh stop 4                 # tout arreter
+./ttb.sh deploy 4               # once, and after every code change
+./ttb.sh start 4 triangle       # start the fleet
+./ttb.sh teleop                 # drive tortuga1; the others follow
+./ttb.sh formation 4 carre      # switch formation without restarting
+./ttb.sh stop 4                 # stop everything
 ```
 
-Avec 2 ou 3 robots : remplace simplement `4` par `2` ou `3` partout.
+With 2 or 3 robots, replace `4` with `2` or `3` everywhere.
 
-## Calibration du casque cyan (a faire une fois)
+Note that `deploy` copies but does **not** build — use `tools/deploy_build.sh` if
+you want both. See [`scripts/README.md`](scripts/README.md).
 
-L'eclairage de la salle decale la teinte. Sur un robot (ou un PC avec webcam) :
-
-```bash
-python3 tools/calibrate_hsv.py
-```
-
-Ajuste les sliders jusqu'a isoler le casque, puis reporte les valeurs dans
-`formation_control/detector.py` (`CYAN_LOW`, `CYAN_HIGH`). Redeploie ensuite.
-
-## GUI (optionnel)
+## GUI
 
 ```bash
 python3 tools/launcher_gui.py
 ```
 
-Selectionne le nombre de robots + la formation, puis Lancer / Changer / Teleop / STOP.
+Start the bringup, pick a mode (`wander` / `cascade` / `dataset`), and inspect
+what is happening through the Log, Camera, Lidar, Topics and Dataset tabs. See
+[`tools/README.md`](tools/README.md).
 
-## Formations disponibles
+## Helmet colour calibration
 
-`colonne`, `ligne`, `triangle`, `carre`. Les offsets (range, bearing) par
-follower sont definis dans `formation_control/formations.py` — modifiables.
+Room lighting shifts the hue, so this has to be done on site.
 
-## Limites connues
+**For the cascade** (`tracker_node.py`), on a robot camera over the network:
 
-- Vision pure : un follower doit voir le casque. Formations profondes (4e robot
-  cache derriere les autres) fragiles -> envisager le chainage F->F.
-- Un seul casque = un seul leader visible ; les followers ne se distinguent pas
-  entre eux. Pour des formations laterales strictes, des AprilTags distincts
-  sont plus robustes.
-- Tourner le noeud follower SUR le robot (jamais streamer l'image au PC).
+```bash
+python3 tools/hsv_tuner.py tortuga3
 ```
 
-## Validation 0 -> 100%
+Adjust until the helmet is cleanly isolated, press `P` to print the thresholds,
+and copy them into the `COLORS` dict at the top of
+`formation_control/tracker_node.py` — a single place to edit. Then redeploy.
 
-1. Calibration cyan sur image reelle.
-2. Detection seule (bearing/range affiches, robot immobile).
-3. Un follower suit le leader pousse a la main (colonne).
-4. Reglage des gains k_lin / k_ang.
-5. 2 robots, puis 3, puis 4.
-6. Toutes les formations + transitions a chaud.
+**For the legacy cyan path** (`detector.py`), on a local webcam:
+
+```bash
+python3 tools/calibrate_hsv.py
+```
+
+Copy the values into `CYAN_LOW` / `CYAN_HIGH` in
+`formation_control/detector.py`, then redeploy.
+
+## Dataset capture
+
+The dataset mode runs `wander` + `recorder` on each robot. The recorder writes,
+per 5-minute segment, native JPEG frames (no re-encoding, 55-60 fps) plus
+`frames.csv`, `scan.csv` and `odom.csv`, each row carrying a millisecond wall
+clock *and* the ROS stamp from the same clock across all sensors — so frames,
+scans and poses align exactly.
+
+A full session:
+
+```bash
+cd tools
+./dataset_tools.sh start 1 2 3 4     # wander + record
+./dataset_tools.sh drain 2 3         # optional: pull + purge while recording
+./dataset_tools.sh stop              # clean stop, recorder first
+./dataset_tools.sh collect 1 2 3 4   # pull + assemble + join + tidy
+```
+
+`collect` pulls everything, assembles each segment into an mp4 using the real
+frame timestamps, joins them into `<robot>_<session>_final.mp4`, converts any
+rosbag to CSV, and tidies each session into a self-contained folder. The full
+pipeline, and the individual tools behind it, are documented in
+[`tools/README.md`](tools/README.md).
+
+Current runs record **no rosbag**: the recorder writes the CSVs itself, which is
+lighter on the Pi and directly usable. `tools/bag_to_csv.py` remains for bags
+captured before that change.
+
+## Available formations
+
+`colonne`, `ligne`, `triangle`, `carre`. The per-follower (range, bearing)
+offsets are defined in `formation_control/formations.py` and are easy to edit;
+the table is reproduced in [`config/README.md`](config/README.md).
+
+These apply to the `follower` path. In the cascade, geometry comes from each
+tracker's `desired_bearing` and `target_distance` instead.
+
+## Known limitations
+
+- **Pure vision:** a follower has to see the helmet. Deep formations (a 4th robot
+  hidden behind the others) are fragile. The lidar relay in `tracker_node.py`
+  covers brief losses, not sustained occlusion.
+- **The cyan path has one helmet, so one visible leader**, and followers cannot
+  tell each other apart. For strict lateral formations, distinct AprilTags would
+  be more robust than colour.
+- **Run the vision node on the robot**, never stream raw images to the PC — the
+  raw stream is ~14 MB/s and does not survive Wi-Fi.
+- **An fps set at launch does not stick**; auto-exposure takes back control and
+  the rate drops to ~18 fps. It has to be re-locked at runtime on the robot (the
+  GUI does this automatically ~16 s after bringup).
+- **Namespace applied twice** is the classic silent failure: the TurtleBot3
+  bringup already applies it, so an extra `PushRosNamespace` yields
+  `/tortugaX/tortugaX/scan` and every subscriber goes quiet with no error. See
+  [`launch/README.md`](launch/README.md).
+
+## Bring-up checklist, 0 → 100%
+
+1. Colour calibration on a real image, under the room's lighting.
+2. Detection only: bearing and range printed, robot stationary.
+3. One follower tracking a leader pushed by hand (column).
+4. Tune the `k_lin` / `k_ang` gains.
+5. Two robots, then three, then four.
+6. All formations, plus runtime transitions between them.
